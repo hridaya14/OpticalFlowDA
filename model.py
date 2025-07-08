@@ -19,6 +19,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 import skimage
 from core.datasets import KittiCleanFoggyDataset
+from loss import compute_flow_loss
+from tool import build_sam_optimizer, build_sam_scheduler
 
 from torch.utils.data import DataLoader
 # from aanet import AANet
@@ -32,13 +34,53 @@ from utils import transforms
 from ptlflow.utils.io_adapter import IOAdapter
 from ptlflow.utils import flow_utils
 
+from core.dehazing import create_model
+
+from core.guided_flow_net import build_flowmodel
+
+try:
+    from torch.cuda.amp import GradScaler
+except:
+    # dummy GradScaler for PyTorch < 1.6
+    print("dummy GradScaler for PyTorch < 1.6")
+    class GradScaler:
+        def __init__(self, enabled=True):
+            pass
+        def scale(self, loss):
+            return loss
+        def unscale_(self, optimizer):
+            pass
+        def step(self, optimizer):
+            optimizer.step()
+        def update(self):
+            pass
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def samflow_init(model, cfg):
+    if cfg.last_stage_ckpt is not None:
+            print("[Loading ckpt from {}]".format(cfg.last_stage_ckpt))
 
+            ckpt_dict = torch.load(cfg.last_stage_ckpt, map_location='cpu')
+
+            if 'state_dict' in ckpt_dict:
+                ckpt_dict = ckpt_dict['state_dict']
+            old_ckpt_dict = model.state_dict()
+            new_ckpt_dict = {}
+            for k in ckpt_dict:
+                if k.startswith('module.'):
+                    key_in_model = k[7:]
+                elif k.startswith('model.'):
+                    key_in_model = k[6:]
+                else:
+                    key_in_model = k
+                if key_in_model in old_ckpt_dict and ckpt_dict[k].shape == old_ckpt_dict[key_in_model].shape:
+                    new_ckpt_dict[key_in_model] = ckpt_dict[k]
+            # quit()
+            model.load_state_dict(new_ckpt_dict, strict=False)
 
 class Model(object):
     def __init__(self,args):
@@ -166,14 +208,63 @@ class Model(object):
         clean_flow_model.to(device)
         clean_flow_model.eval()
 
+        dehaze_model = create_model(self.args)
+        dehaze_model.setup(self.args)
+        dehaze_model.train()
+
+        samflow_model = build_flowmodel(self.args)
+        samflow_init(samflow_model, self.args)
+
+        # Optimizers and losses
+        mse_criterion = nn.MSELoss()
+        sam_optimizer = build_sam_optimizer(samflow_model, self.args)
+        sam_scheduler = build_sam_scheduler(samflow_model,sam_optimizer)
+
+        flow_scaler = GradScaler(enabled=self.args.mixed_precision)
+
+
+
         for batch in train_loader:
+            sam_optimizer.zero_grad()
 
             clean_images = batch['clean_images'].to(device)
-            foggy_images = batch['foggy_images']
+            foggy_images = batch['foggy_images'].to(device)
 
             with torch.no_grad():
                 clean_predictions = clean_flow_model({'images': clean_images})
                 final_clean_flow = clean_predictions['flows'][-1]
+
+            foggy_frame_t1 = foggy_images[:, 0, ...]
+            foggy_frame_t2 = foggy_images[:, 1, ...]
+
+            dehaze_model.set_input({'haze': foggy_frame_t1})
+            dehaze_model.forward()
+            dehazed_frame_t1 = dehaze_model.get_current_visuals()['fused_J']
+            print(f"###### {dehazed_frame_t1.shape} #####")
+
+            dehaze_model.set_input({'haze': foggy_frame_t2})
+            dehaze_model.forward()
+            dehazed_frame_t2 = dehaze_model.get_current_visuals()['fused_J']
+            print(f"###### {dehazed_frame_t2.shape} #####")
+
+            # Running samflow model to get optical flow
+            flow_prediction_list = samflow_model(dehazed_frame_t1,dehazed_frame_t2)
+            predicted_flow = flow_prediction_list[0]
+
+            flow_loss, metrics = compute_flow_loss(predicted_flow, final_clean_flow)
+
+            flow_scaler.scale(flow_loss).backward()
+            flow_scaler.unscale_(sam_optimizer)
+            torch.nn.utils.clip_grad_norm_(samflow_model.parameters(), self.args.clip)
+
+            flow_scaler.step(sam_optimizer)
+            sam_scheduler.step()
+            flow_scaler.update()
+
+
+
+
+
 
 
 
