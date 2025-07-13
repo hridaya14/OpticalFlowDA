@@ -7,3 +7,4 @@ __pycache__/
 /.vscode
 *.vscode
 *.ipynb_checkpoints
+/alt_cuda_corr

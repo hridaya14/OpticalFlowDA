@@ -10,35 +10,37 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import core.datasets as datasets
+from core.utils.utils import transformation_from_parameters, disp_to_depth, filter_base_params, filter_specific_params
+
 
 # --- Assume necessary imports are in place ---
 # MemFlow imports
-from core.Networks import build_network
-import core.datasets_video as datasets
-from core.loss import sequence_loss as memflow_sequence_loss
-from core.optimizer import fetch_optimizer
-from core.utils.misc import process_cfg
-from loguru import logger as loguru_logger
-from core.utils.logger import Logger
-
+from core.Memflow import build_network
 # Dispnet Imports
-from ucda.models import AANet
-from ucda.losses import disp_pyramid_loss
+from core.depth_nets.core.mocha_stereo import Mocha
+from loss import disp_pyramid_loss, sequence_loss
 
 # PoseNet Imports
-from ucda.models import PoseNet, BackprojectDepth, Project3D
-from ucda.losses import motion_consis_loss, transformation_from_parameters
+from core.posenet import PoseNet
+from tool import BackprojectDepth, Logger, Project3D
 
 try:
-    from torch.cuda.amp import GradScaler
-except ImportError:  # Dummy GradScaler for PyTorch < 1.6
+    from torch.cuda.amp.grad_scaler import GradScaler
+except:
+    # dummy GradScaler for PyTorch < 1.6
+    print("dummy GradScaler for PyTorch < 1.6")
     class GradScaler:
-        def __init__(self, enabled=False): self.enabled = enabled
-        def scale(self, loss): return loss
-        def unscale_(self, optimizer): pass
-        def step(self, optimizer): optimizer.step()
-        def update(self): pass
-
+        def __init__(self, enabled=True):
+            pass
+        def scale(self, loss):
+            return loss
+        def unscale_(self, optimizer):
+            pass
+        def step(self, optimizer):
+            optimizer.step()
+        def update(self):
+            pass
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -51,216 +53,192 @@ class Model(object):
     def __init__(self, args):
         self.args = args
 
-    def stage_1_train(gpu, cfg):
-        """Stage 1: Trains MemFlow and AANet jointly."""
-        rank = cfg.node_rank * cfg.gpus + gpu
-        torch.cuda.set_device(rank)
-        if cfg.DDP:
-            dist.init_process_group(
-                backend='nccl', init_method='env://', world_size=cfg.world_size, rank=rank)
+    def stage_1_train(self):
+        # dataset_loader
+        train_loader = datasets.fetch_dataloader(self.args)
+        # train_loader = datasets.fetch_clean_dataloader(self.args)
 
-        # 1. --- Initialize Models ---
-        model_flow = build_network(cfg)  # MemFlow
-        model_depth = AANet(cfg.aanet_args)  # AANet
+        # param setting
+        # MemFlow
+        model_flow = nn.DataParallel(build_network(self.args), device_ids=self.args.gpus)
+        print("Parameter Count: %d" % count_parameters(model_flow))
 
-        if cfg.DDP:
-            model_flow = nn.SyncBatchNorm.convert_sync_batchnorm(
-                model_flow).cuda()
-            model_flow = nn.parallel.DistributedDataParallel(
-                model_flow, device_ids=[rank])
-        else:
-            model_flow = nn.DataParallel(model_flow, device_ids=[gpu]).cuda()
+        if self.args.restore_flow_ckpt is not None:
+            model_flow.load_state_dict(torch.load(self.args.restore_flow_ckpt), strict=False)
 
-        model_depth = nn.DataParallel(model_depth, device_ids=[gpu]).cuda()
-
-        if rank == 0:
-            loguru_logger.info("MemFlow Parameter Count: %d" %
-                               count_parameters(model_flow))
-            loguru_logger.info("AANet Parameter Count: %d" %
-                               count_parameters(model_depth))
-
-        # 2. --- Load Checkpoints (if any) ---
-        if cfg.restore_ckpt:
-            print(f"[Loading MemFlow ckpt from {cfg.restore_ckpt}]")
-            # Loading logic here...
-        if cfg.restore_disp_ckpt:
-            print(f"[Loading AANet ckpt from {cfg.restore_disp_ckpt}]")
-            model_depth.load_state_dict(torch.load(
-                cfg.restore_disp_ckpt, map_location='cpu'), strict=False)
-
+        model_flow.cuda()
         model_flow.train()
+
+        # aanet
+        model_depth = Mocha(self.args)
+        print("Parameter Count: %d" % count_parameters(model_depth))
+
+        if self.args.restore_disp_ckpt is not None:
+            model_depth.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
+
+        model_depth = nn.DataParallel(model_depth, device_ids=self.args.gpus)
+
+        model_depth.cuda()
         model_depth.train()
 
-        # 3. --- DataLoaders and Optimizers ---
-        train_loader = datasets.fetch_dataloader(cfg, DDP=cfg.DDP, rank=rank)
+        # if self.args.stage != 'chairs':
+        #     model_flow.module.freeze_bn()
 
-        # MemFlow Optimizer
-        flow_optimizer, flow_scheduler = fetch_optimizer(
-            model_flow, cfg.trainer)
+        # training process
+        flow_optimizer = optim.AdamW(model_flow.parameters(), lr=self.args.lr, weight_decay=self.args.wdecay, eps=self.args.epsilon)
+        flow_scheduler = optim.lr_scheduler.OneCycleLR(flow_optimizer, self.args.lr, self.args.num_steps+100,
+            pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
 
-        # AANet Optimizer
-        # ... (AANet optimizer setup from your UCDA code)
-        depth_optimizer = optim.Adam(model_depth.parameters(
-        ), lr=cfg.trainer.lr, weight_decay=cfg.trainer.wdecay*10)
-        depth_scheduler = optim.lr_scheduler.MultiStepLR(
-            depth_optimizer, milestones=[400, 600, 800, 900], gamma=0.5)
 
-        # 4. --- Training Loop ---
+        # disp optimizer
+        specific_params = list(filter(filter_specific_params,
+                                  model_depth.named_parameters()))
+        base_params = list(filter(filter_base_params,
+                                model_depth.named_parameters()))
+        specific_params = [kv[1] for kv in specific_params]  # kv is a tuple (key, value)
+        base_params = [kv[1] for kv in base_params]
+
+        specific_lr = self.args.lr * 0.1
+        milestones = [400, 600, 800, 900]
+        params_group = [
+            {'params': base_params, 'lr': self.args.lr},
+            {'params': specific_params, 'lr': specific_lr},
+        ]
+        depth_optimizer = optim.Adam(params_group, weight_decay=self.args.wdecay*10)
+        depth_scheduler = optim.lr_scheduler.MultiStepLR(depth_optimizer, milestones=milestones, gamma=0.5, last_epoch=-1)
+
+        # depth_scheduler = optim.lr_scheduler.OneCycleLR(depth_optimizer, self.args.lr, self.args.num_steps+100,
+        #     pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
+        # optimizer, scheduler = fetch_optimizer(self.args, model_flow)
+
         total_steps = 0
-        flow_scaler = GradScaler(enabled=cfg.mixed_precision)
-        depth_scaler = GradScaler(enabled=cfg.mixed_precision)
-        logger = Logger(model_flow, flow_scheduler, cfg)
+        flow_scaler = GradScaler(enabled=self.args.mixed_precision)
+        depth_scaler = GradScaler(enabled=self.args.mixed_precision)
+        logger = Logger('checkpoints/', model_flow, flow_scheduler)
 
+        VAL_FREQ = 5000
+        VAL_SUMMARY_FREQ = 500
+
+        add_noise = False
         should_keep_training = True
+
+        adaptive_weight = 0.0
+
         while should_keep_training:
             for i_batch, data_blob in enumerate(train_loader):
                 flow_optimizer.zero_grad()
                 depth_optimizer.zero_grad()
-
-                # Unpack data
-                images = data_blob['images'].cuda()
                 image1_left = data_blob['left_1'].cuda()
+                image2_left = data_blob['left_2'].cuda()
                 image1_right = data_blob['right_1'].cuda()
-                flows, valids = data_blob['flow'].cuda(
-                ), data_blob['valid'].cuda()
-                disp, disp_mask = data_blob['disp'].cuda(
-                ), data_blob['disp_mask'].cuda()
+                image2_right = data_blob['right_2'].cuda()
+                flow = data_blob['flow'].cuda()
+                valid = data_blob['valid'].cuda()
+                disp = data_blob['disp'].cuda()
+                # image1, image2, flow, valid, disp  = [x.cuda() for x in data_blob]
 
-                # --- Forward Passes ---
-                images_norm = 2 * (images / 255.0) - 1.0
-                with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                    flow_predictions = model_flow(
-                        images_norm, iters=cfg.trainer.iters)
-                    depth_predictions = model_depth(image1_left, image1_right)
+                disp_mask = (disp > 0) & (disp < self.args.max_disp)
 
-                # --- Loss Calculation ---
-                flow_loss, flow_metrics = memflow_sequence_loss(
-                    flow_predictions, flows, valids, cfg.trainer.gamma)
-                disp_loss, disp_metrics = disp_pyramid_loss(
-                    depth_predictions, disp, disp_mask)
+                if self.args.load_pseudo_gt:
+                    pseudo_gt_disp = data_blob['pseudo_disp'].cuda()
+                    pseudo_mask = (pseudo_gt_disp > 0) & (pseudo_gt_disp < self.args.max_disp) & (~disp_mask)  # inverse mask
 
-                # --- Backward & Optimize Flow ---
-                flow_scaler.scale(flow_loss).backward(retain_graph=True)
+                if not disp_mask.any():
+                    continue
+
+                if add_noise:
+                    stdv = np.random.uniform(0.0, 5.0)
+                    image1_left = (image1_left + stdv * torch.randn(*image1_left.shape).cuda()).clamp(0.0, 255.0)
+                    image2_left = (image2_left + stdv * torch.randn(*image2_left.shape).cuda()).clamp(0.0, 255.0)
+                    image1_right = (image1_right + stdv * torch.randn(*image1_right.shape).cuda()).clamp(0.0, 255.0)
+                    image2_right = (image2_right + stdv * torch.randn(*image2_right.shape).cuda()).clamp(0.0, 255.0)
+
+                flow_predictions,_ = model_flow(image1_left, image2_left, iters=self.args.iters)
+                _,depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
+
+                flow_loss, flow_metrics = sequence_loss(flow_predictions, flow, valid, self.args.gamma)
+                if self.args.load_pseudo_gt:
+                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, pseudo_gt_disp, pseudo_mask, self.args.load_pseudo_gt)
+                else:
+                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, disp, disp_mask, self.args.load_pseudo_gt)
+
+                # flow network update
+                flow_scaler.scale(flow_loss).backward()
                 flow_scaler.unscale_(flow_optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    model_flow.parameters(), cfg.trainer.clip)
+                torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
+
                 flow_scaler.step(flow_optimizer)
                 flow_scheduler.step()
                 flow_scaler.update()
 
-                # --- Backward & Optimize Depth ---
-                depth_scaler.scale(disp_loss).backward()
+                # disp network update
+                depth_scaler.scale(adaptive_weight * disp_loss).backward()
                 depth_scaler.unscale_(depth_optimizer)
+                # torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
+
                 depth_scaler.step(depth_optimizer)
                 depth_scheduler.step()
                 depth_scaler.update()
 
-                total_steps += 1
-                if rank == 0:
-                    logger.push({**flow_metrics, **disp_metrics})
 
-                if total_steps >= cfg.trainer.num_steps:
+                total_steps += 1
+
+                # print info
+                dict_metric = dict(flow_metrics, **disp_metrics)
+                logger.push(dict_metric)
+                # logger.push(disp_metrics)
+
+                # test
+                # disp = depth_predictions[-1][-1].detach().cpu().numpy()  # [H, W]
+                # skimage.io.imsave('pred_disp/' + str(total_steps) + '.png', (disp * 256.).astype(np.uint16))
+
+                if total_steps % VAL_SUMMARY_FREQ == 0:
+                    img_summary = dict()
+                    img_summary['left_1'] = image1_left
+                    img_summary['right_1'] = image1_right
+                    img_summary['gt_flow'] = flow
+                    img_summary['pred_flow'] = flow_predictions[-1]
+                    img_summary['gt_disp'] = disp
+                    img_summary['pred_disp'] = depth_predictions[-1]
+                    logger.save_image('train', img_summary)
+
+
+                if total_steps % VAL_FREQ == 0:
+                    FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft')
+                    torch.save(model_flow.state_dict(), FLOW_PATH)
+
+                    DISP_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'aanet')
+                    torch.save(model_depth.state_dict(), DISP_PATH)
+
+
+                    # results = {}
+                    # for val_dataset in self.args.validation:
+                    #     if val_dataset == 'chairs':
+                    #         results.update(evaluate.validate_chairs(model_flow.module))
+                    #     elif val_dataset == 'sintel':
+                    #         results.update(evaluate.validate_sintel(model_flow.module))
+                    #     elif val_dataset == 'kitti':
+                    #         results.update(evaluate.validate_kitti(model_flow.module))
+
+                    # logger.write_dict(results)
+
+                    # model_flow.train()
+                    # if self.args.stage != 'chairs':
+                    #     model_flow.module.freeze_bn()
+
+                if total_steps > self.args.num_steps:
                     should_keep_training = False
                     break
-            if not should_keep_training:
-                break
 
-        # --- Save final models ---
-        if rank == 0:
-            torch.save(model_flow.state_dict(), f'{
-                       cfg.log_dir}/{cfg.name}_memflow_stage1.pth')
-            torch.save(model_depth.state_dict(), f'{
-                       cfg.log_dir}/{cfg.name}_aanet_stage1.pth')
+        logger.close()
+        FLOW_PATH = 'checkpoints/%s.pth' % 'memflow'
+        DISP_PATH = 'checkpoints/%s.pth' % 'mocha'
+        torch.save(model_flow.state_dict(), FLOW_PATH)
+        torch.save(model_depth.state_dict(), DISP_PATH)
 
-    def stage_2_train(gpu, cfg):
-        """Stage 2: Adds geometric consistency loss using a frozen PoseNet."""
-        rank = cfg.node_rank * cfg.gpus + gpu
-        torch.cuda.set_device(rank)
-        if cfg.DDP:
-            dist.init_process_group(
-                backend='nccl', init_method='env://', world_size=cfg.world_size, rank=rank)
+        return FLOW_PATH, DISP_PATH
 
-        # 1. --- Initialize All Models ---
-        model_flow = build_network(cfg)  # MemFlow
-        model_depth = AANet(cfg.aanet_args)  # AANet
-        model_pose = PoseNet(cfg.posenet_args)  # PoseNet
 
-        # Load Stage 1 models
-        print("[Loading Stage 1 MemFlow model...]")
-        model_flow.load_state_dict(torch.load(
-            cfg.stage1_memflow_ckpt, map_location='cpu'))
-        print("[Loading Stage 1 AANet model...]")
-        model_depth.load_state_dict(torch.load(
-            cfg.stage1_aanet_ckpt, map_location='cpu'))
-
-        # Load PRETRAINED PoseNet and freeze it
-        print("[Loading PRETRAINED PoseNet model...]")
-        model_pose.load_state_dict(torch.load(
-            cfg.restore_pose_ckpt, map_location='cpu'))
-        for param in model_pose.parameters():
-            param.requires_grad = False
-
-        # Setup DDP/DataParallel and move to GPU
-        # ... (model setup as in Stage 1)
-        model_flow.cuda().train()
-        model_depth.cuda().train()  # AANet can also be fine-tuned
-        model_pose.cuda().eval()   # PoseNet is for inference only
-
-        # 2. --- Initialize Projection helpers ---
-        h, w = cfg.image_size
-        backproject_depth = BackprojectDepth(cfg.batch_size, h, w).cuda()
-        project_3d = Project3D(cfg.batch_size, h, w).cuda()
-
-        # 3. --- Optimizers (only for trainable models) ---
-        flow_optimizer, flow_scheduler = fetch_optimizer(
-            model_flow, cfg.trainer)
-        depth_optimizer = optim.Adam(model_depth.parameters(
-        ), lr=cfg.trainer.lr * 0.1)  # Lower LR for fine-tuning
-
-        # 4. --- Training Loop ---
-        # ... (setup logger, scalers, etc. as in Stage 1)
-        train_loader = datasets.fetch_dataloader(cfg, DDP=cfg.DDP, rank=rank)
-
-        while should_keep_training:
-            for i_batch, data_blob in enumerate(train_loader):
-                # ... (zero grads, unpack data as in Stage 1)
-
-                # --- Forward Passes ---
-                with torch.cuda.amp.autocast(enabled=cfg.mixed_precision):
-                    flow_predictions = model_flow(
-                        images_norm, iters=cfg.trainer.iters)
-                    depth_predictions = model_depth(image1_left, image1_right)
-
-                # --- Calculate Rigid Flow (from PoseNet) ---
-                with torch.no_grad():
-                    pred_poses = model_pose(
-                        image1_left, image2_left)  # Simplified
-                    pred_disp_final = depth_predictions[-1]
-                    # Convert disparity to depth
-                    _, depth = disp_to_depth(pred_disp_final, 0.1, 100)
-                    cam_points, _ = backproject_depth(depth, inv_K)
-                    rigid_flow = project_3d(cam_points, K, pred_poses)
-
-                # --- Loss Calculation ---
-                flow_loss, flow_metrics = memflow_sequence_loss(
-                    flow_predictions, flows, valids, cfg.trainer.gamma)
-                disp_loss, disp_metrics = disp_pyramid_loss(
-                    depth_predictions, disp, disp_mask)
-
-                # Add Geometric Loss
-                geo_loss, motion_metrics = motion_consis_loss(
-                    flow_predictions, rigid_flow, valids)
-                total_flow_loss = flow_loss + cfg.geo_weight * geo_loss
-
-                # --- Backward & Optimize ---
-                # ... (Separate backward steps for total_flow_loss and disp_loss)
-
-        # --- Save final models ---
-        if rank == 0:
-            torch.save(model_flow.state_dict(), f'{
-                       cfg.log_dir}/{cfg.name}_memflow_stage2.pth')
-            torch.save(model_depth.state_dict(), f'{
-                       cfg.log_dir}/{cfg.name}_aanet_stage2.pth')
 
     # def generate_depth_foggy_images(self):
     #     if not os.path.isdir('generate_images'):
