@@ -110,54 +110,92 @@ def sequence_loss(flow_preds, flow_gt, valid, cfg):
 
     return flow_loss, metrics, NAN_flag
 
+def disp_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, max_disp=192):
+    """
+    Disparity Loss: adapted from flow-style loss to disparity format.
+    disp_preds: List of predicted disparities (N, H, W)
+    disp_init_pred: Initial disparity prediction
+    disp_gt: Ground truth disparity (B, H, W)
+    valid: valid disparity mask (B, H, W)
+    """
+    n_predictions = len(disp_preds)
+    assert n_predictions >= 1
+
+    # ensure valid mask excludes invalid disparities
+    valid_mask = (valid >= 0.5) & (disp_gt < max_disp) & (~torch.isinf(disp_gt)) & (~torch.isnan(disp_gt))
+
+    # Initial disparity loss
+    loss = F.smooth_l1_loss(disp_init_pred[valid_mask], disp_gt[valid_mask], reduction='mean')
+
+    # Weighted multi-scale losses
+    for i in range(n_predictions):
+        adjusted_loss_gamma = loss_gamma ** (15 / (n_predictions - 1))
+        i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
+
+        pred = disp_preds[i]
+        if pred.shape != disp_gt.shape:
+            pred = F.interpolate(pred.unsqueeze(1), size=disp_gt.shape[-2:], mode='bilinear', align_corners=False).squeeze(1)
+            pred *= (disp_gt.shape[-1] / pred.shape[-1])  # scale factor
+
+        i_loss = F.smooth_l1_loss(pred[valid_mask], disp_gt[valid_mask], reduction='mean')
+        loss += i_weight * i_loss
+
+    # Metrics
+    epe = torch.abs(disp_preds[-1] - disp_gt)
+    epe = epe[valid_mask]
+    metrics = {
+        'epe': epe.mean().item(),
+        '1px': (epe < 1).float().mean().item(),
+        '3px': (epe < 3).float().mean().item(),
+        '5px': (epe < 5).float().mean().item(),
+    }
+
+    return loss, metrics
+
 
 def disp_pyramid_loss(disp_preds, disp_gt, gt_mask, pseudo_gt_disp, pseudo_mask, load_pseudo_gt=False):
-    """ Loss function defined over sequence of flow predictions """
+    """Loss function for disparity predictions from MochaStereo (12 scales)."""
     pyramid_loss = []
     pseudo_pyramid_loss = []
     disp_loss = 0
     pseudo_disp_loss = 0
-    # Loss weights
-    if len(disp_preds) == 5:
-        pyramid_weight = [1 / 3, 2 / 3, 1.0, 1.0, 1.0]  # AANet and AANet+
-    elif len(disp_preds) == 4:
-        pyramid_weight = [1 / 3, 2 / 3, 1.0, 1.0]
-    elif len(disp_preds) == 3:
-        pyramid_weight = [1.0, 1.0, 1.0]  # 1 scale only
-    elif len(disp_preds) == 1:
-        pyramid_weight = [1.0]  # highest loss only
-    else:
-        raise NotImplementedError
 
-    for k in range(len(disp_preds)):
+    num_preds = len(disp_preds)
+
+    # Use exponentially decaying weights (heavier on final predictions)
+    pyramid_weight = [1.0 * (0.5 ** (num_preds - i - 1)) for i in range(num_preds)]
+
+    for k in range(num_preds):
         pred_disp = disp_preds[k]
         weight = pyramid_weight[k]
 
         if pred_disp.size(-1) != disp_gt.size(-1):
-            pred_disp = pred_disp.unsqueeze(1)  # [B, 1, H, W]
+            if pred_disp.ndim == 3:
+                pred_disp = pred_disp.unsqueeze(1)  # [B, 1, H, W]
+            elif pred_disp.ndim != 4:
+                raise ValueError(f"Unexpected pred_disp shape: {pred_disp.shape}")
+
             pred_disp = F.interpolate(pred_disp, size=(disp_gt.size(-2), disp_gt.size(-1)),
-                                        mode='bilinear', align_corners=False) * (disp_gt.size(-1) / pred_disp.size(-1))
+                                    mode='bilinear', align_corners=False) * (disp_gt.size(-1) / pred_disp.size(-1))
             pred_disp = pred_disp.squeeze(1)  # [B, H, W]
 
-        curr_loss = F.smooth_l1_loss(pred_disp[gt_mask], disp_gt[gt_mask],
-                                        reduction='mean')
+
+        curr_loss = F.smooth_l1_loss(pred_disp[gt_mask], disp_gt[gt_mask], reduction='mean')
         disp_loss += weight * curr_loss
         pyramid_loss.append(curr_loss)
 
-        # Pseudo gt loss
         if load_pseudo_gt:
-            pseudo_curr_loss = F.smooth_l1_loss(pred_disp[pseudo_mask], pseudo_gt_disp[pseudo_mask],
-                                                reduction='mean')
+            pseudo_curr_loss = F.smooth_l1_loss(pred_disp[pseudo_mask], pseudo_gt_disp[pseudo_mask], reduction='mean')
             pseudo_disp_loss += weight * pseudo_curr_loss
-
             pseudo_pyramid_loss.append(pseudo_curr_loss)
 
     total_loss = disp_loss + pseudo_disp_loss
     metrics = {
-        'disp_epe': pyramid_loss[-1],
+        'disp_epe': pyramid_loss[-1],  # Final scale loss for logging
     }
 
     return total_loss, metrics
+
 
 
 

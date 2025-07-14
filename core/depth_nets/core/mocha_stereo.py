@@ -158,8 +158,6 @@ class Mocha(nn.Module):
     def forward(self, image1, image2, iters=12, flow_init=None, test_mode=False):
         """ Estimate disparity between pair of frames """
 
-        image1 = (2 * (image1 / 255.0) - 1.0).contiguous()
-        image2 = (2 * (image2 / 255.0) - 1.0).contiguous()
         with autocast(enabled=self.args.mixed_precision):
             features_left = self.feature(image1)
             features_right = self.feature(image2)
@@ -172,6 +170,7 @@ class Mocha(nn.Module):
 
             match_left = self.desc(self.conv(features_left[0]))
             match_right = self.desc(self.conv(features_right[0]))
+            print(f"match_left: {match_left.shape}, match_right: {match_right.shape}")
             gwc_volume = build_gwc_volume(match_left, match_right, self.args.max_disp//4, 8)
             gwc_volume = self.corr_stem(gwc_volume)
             gwc_volume = self.corr_feature_att(gwc_volume, features_left[0])

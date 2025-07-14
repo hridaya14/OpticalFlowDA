@@ -35,11 +35,9 @@ class FlowDataset(data.Dataset):
         self.has_gt_list = []
 
     def __getitem__(self, index):
-
         if not self.init_seed:
             worker_info = torch.utils.data.get_worker_info()
             if worker_info is not None:
-                # print(worker_info.id)
                 torch.manual_seed(worker_info.id)
                 np.random.seed(worker_info.id)
                 random.seed(worker_info.id)
@@ -65,15 +63,12 @@ class FlowDataset(data.Dataset):
                     valids.append(valid * 0.0)
 
         imgs = [frame_utils.read_gen(path) for path in self.image_list[index]]
-
         flows = [np.array(flow).astype(np.float32) for flow in flows]
+        imgs = [np.array(img).astype(np.uint8) for img in imgs]
 
         if self.subsample_groundtruth:
             flows = [flow[::2, ::2] for flow in flows]
 
-        imgs = [np.array(img).astype(np.uint8) for img in imgs]
-
-        # grayscale images
         if len(imgs[0].shape) == 2:
             imgs = [np.tile(img[..., None], (1, 1, 3)) for img in imgs]
         else:
@@ -94,8 +89,24 @@ class FlowDataset(data.Dataset):
         else:
             valids = [torch.from_numpy(valid).float() for valid in valids]
             o_valids = True
+
+        # === NEW: Load stereo right image and disparity map ===
+        stereo_right_img = frame_utils.read_gen(self.stereo_right_list[index])
+        stereo_right_img = np.array(stereo_right_img).astype(np.uint8)[..., :3]
+        stereo_right_img = torch.from_numpy(stereo_right_img).permute(2, 0, 1).float()
+
+        disparity = frame_utils.read_gen(self.disparity_list[index])
+        disparity = np.array(disparity).astype(np.float32)
+        disparity = torch.from_numpy(disparity).unsqueeze(0)  # shape: (1, H, W)
+
         if not self.forward_warp:
-            return torch.stack(imgs), torch.stack(flows), torch.stack(valids)
+            return (
+                torch.stack(imgs),         # left temporal frames
+                torch.stack(flows),
+                torch.stack(valids),
+                stereo_right_img,          # right stereo image
+                disparity                  # disparity map
+            )
         else:
             new_size = (flows[0].shape[1] // 8, flows[0].shape[2] // 8)
             if not o_valids:
@@ -103,12 +114,25 @@ class FlowDataset(data.Dataset):
                 forward_warped_flow = [torch.zeros(2, new_size[0], new_size[1])] + [forward_interpolate(flow) for flow in downsampled_flow]
             else:
                 forward_warped_flow = [torch.zeros(2, new_size[0], new_size[1])] * len(flows)
-            return torch.stack(imgs), torch.stack(flows), torch.stack(valids), torch.stack(forward_warped_flow)
+
+            return (
+                torch.stack(imgs),
+                torch.stack(flows),
+                torch.stack(valids),
+                torch.stack(forward_warped_flow),
+                stereo_right_img,
+                disparity
+            )
+
 
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list
         self.image_list = v * self.image_list
         self.has_gt_list = v * self.has_gt_list
+        if hasattr(self, 'stereo_right_list'):
+            self.stereo_right_list = v * self.stereo_right_list
+        if hasattr(self, 'disparity_list'):
+            self.disparity_list = v * self.disparity_list
         return self
 
     def __len__(self):
@@ -161,7 +185,13 @@ class FlowDatasetTest(data.Dataset):
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list
         self.image_list = v * self.image_list
+        self.has_gt_list = v * self.has_gt_list
+        if hasattr(self, 'stereo_right_list'):
+            self.stereo_right_list = v * self.stereo_right_list
+        if hasattr(self, 'disparity_list'):
+            self.disparity_list = v * self.disparity_list
         return self
+
 
     def __len__(self):
         return len(self.image_list)
@@ -508,24 +538,34 @@ class KITTI(FlowDataset):
         self.image_list = []
         self.flow_list = []
         self.has_gt_list = []
+        self.stereo_right_list = []
+        self.disparity_list = []
+
 
         for idx_list in range(200):
             for idx_image in range(0, input_frames - 1):
-                # Build image sequence
                 images = [
                     os.path.join(root, "KITTI-multiview/training/image_2", "000{:03}_{:02}.png".format(idx_list, i - idx_image + 10))
                     for i in range(input_frames)
                 ]
                 self.image_list.append(images)
 
-                # One flow per sequence, aligned with frame 10
                 flows = [os.path.join(root, "training/flow_occ", "000{:03}_10.png".format(idx_list))] * (input_frames - 1)
                 self.flow_list.append(flows)
 
-                # Only one valid flow (centered at frame 10), others are dummy
                 self.has_gt_list.append(
                     [False] * idx_image + [True] + [False] * (input_frames - 2 - idx_image)
                 )
+
+                # New additions for stereo right and disparity
+                self.stereo_right_list.append(
+                    os.path.join(root, "KITTI-multiview/training/image_3", "000{:03}_10.png".format(idx_list))
+                )
+
+                self.disparity_list.append(
+                    os.path.join(root, "training/disp_occ_0", "000{:03}_10.png".format(idx_list))
+                )
+
         print(self.image_list[0:3])
         print(self.flow_list[0:3])
         print(self.has_gt_list[0:3])
