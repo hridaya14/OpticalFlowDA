@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nets.feature import BasicBlock, BasicConv, Conv2x
-from nets.warp import disp_warp
+from core.depth_nets.nets.feature import BasicBlock, BasicConv, Conv2x
+from core.depth_nets.nets.warp import disp_warp
 
 def conv2d(in_channels, out_channels, kernel_size=3, stride=1, dilation=1, groups=1):
     return nn.Sequential(nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size,

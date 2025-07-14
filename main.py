@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
-# from model import Model
+from model import Model
 
 # =======================================================
 #               START DIAGNOSTIC BLOCK
@@ -100,19 +100,19 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # if args.stage == 'kitti':
-    #     from core.Memflow.configs.kitti_memflownet import get_cfg
+    if args.stage == 'kitti':
+        from core.Memflow.configs.kitti_memflownet import get_cfg
+    elif args.stage == 'sintel':
+        from core.Memflow.configs.sintel_memflownet import get_cfg
+    # Add other stages as needed
     # elif args.stage == 'sintel':
-    #     from core.Memflow.configs.sintel_memflownet import get_cfg
-    # # Add other stages as needed
-    # # elif args.stage == 'sintel':
-    # #     from configs.sintel_stereo_flow_pose import get_cfg
-    # else:
-    #     raise ValueError(f"Unknown stage: {args.stage}")
+    #     from configs.sintel_stereo_flow_pose import get_cfg
+    else:
+        raise ValueError(f"Unknown stage: {args.stage}")
 
-    # # --- Merging args into cfg ---
-    # cfg = get_cfg()
-    # cfg.update(vars(args))
+    # --- Merging args into cfg ---
+    cfg = get_cfg()
+    cfg.update(vars(args))
 
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
@@ -123,9 +123,9 @@ if __name__ == '__main__':
     if not os.path.isdir('checkpoints'):
         os.mkdir('checkpoints')
 
-    # model = Model(cfg)
+    model = Model(cfg)
     print("=> Start training\n\n")
 
-    # model.stage_1_train()
+    model.stage_1_train()
 
     print("=> End training\n\n")

@@ -1,22 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from .update import GMAUpdateBlock
 from ..encoders import twins_svt_large
 from .cnn import BasicEncoder
 from .corr import CorrBlock
 from ...utils.utils import coords_grid
-from .gma import Attention
 from .sk import SKUpdateBlock6_Deep_nopoolres_AllDecoder
 from .sk2 import SKUpdateBlock6_Deep_nopoolres_AllDecoder2_Mem_skflow
 from .memory_util import *
-try:
-    from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
-except:
-    print('no flash attention installed')
-autocast = torch.cuda.amp.autocast
 
+# Flash attention removed
 
 class MemFlowNet(nn.Module):
     def __init__(self, cfg):
@@ -60,19 +56,15 @@ class MemFlowNet(nn.Module):
 
         print("[Using corr_fn {}]".format(self.cfg.corr_fn))
 
-        self.att = Attention(args=self.cfg, dim=self.context_dim, heads=1, max_pos_size=160, dim_head=self.context_dim)
+        self.att = nn.MultiheadAttention(embed_dim=self.context_dim, num_heads=1, batch_first=True)
         self.train_avg_length = cfg.train_avg_length
 
     def encode_features(self, frame, flow_init=None):
-        # Determine input shape
         if len(frame.shape) == 5:
-            # shape is b*t*c*h*w
             need_reshape = True
             b, t = frame.shape[:2]
-            # flatten so that we can feed them into a 2D CNN
             frame = frame.flatten(start_dim=0, end_dim=1)
         elif len(frame.shape) == 4:
-            # shape is b*c*h*w
             need_reshape = False
         else:
             raise NotImplementedError
@@ -81,7 +73,6 @@ class MemFlowNet(nn.Module):
         if self.cfg.fnet == 'twins':
             fmaps = self.channel_convertor(fmaps)
         if need_reshape:
-            # B*T*C*H*W
             fmaps = fmaps.view(b, t, *fmaps.shape[-3:])
             frame = frame.view(b, t, *frame.shape[-3:])
             coords0, coords1 = self.initialize_flow(frame[:, 0, ...])
@@ -93,20 +84,15 @@ class MemFlowNet(nn.Module):
         return coords0, coords1, fmaps
 
     def encode_context(self, frame):
-        # Determine input shape
         if len(frame.shape) == 5:
-            # shape is b*t*c*h*w
             need_reshape = True
             b, t = frame.shape[:2]
-            # flatten so that we can feed them into a 2D CNN
             frame = frame.flatten(start_dim=0, end_dim=1)
         elif len(frame.shape) == 4:
-            # shape is b*c*h*w
             need_reshape = False
         else:
             raise NotImplementedError
 
-        # shape is b*c*h*w
         cnet = self.cnet(frame)
         if self.cfg.cnet == 'twins':
             cnet = self.proj(cnet)
@@ -114,14 +100,11 @@ class MemFlowNet(nn.Module):
         net, inp = torch.split(cnet, [self.hidden_dim, self.context_dim], dim=1)
         net = torch.tanh(net)
         inp = torch.relu(inp)
-        query, key = self.att.to_qk(inp).chunk(2, dim=1)
-        # query = query * self.att.scale
+        query = key = inp
+
         if need_reshape:
-            # B*C*T*H*W
             query = query.view(b, t, *query.shape[-3:]).transpose(1, 2).contiguous()
             key = key.view(b, t, *key.shape[-3:]).transpose(1, 2).contiguous()
-
-            # B*T*C*H*W
             net = net.view(b, t, *net.shape[-3:])
             inp = inp.view(b, t, *inp.shape[-3:])
 
@@ -131,29 +114,34 @@ class MemFlowNet(nn.Module):
         corr_fn = CorrBlock(fmaps[:, 0, ...], fmaps[:, 1, ...],
                             num_levels=self.cfg.corr_levels, radius=self.cfg.corr_radius)
         flow_predictions = []
-        query = query.flatten(start_dim=2).permute(0, 2, 1).unsqueeze(2)
-        ref_keys = ref_keys.flatten(start_dim=2).permute(0, 2, 1).unsqueeze(2)
+
+        # Flatten query/key/value from [B, C, H, W] to [B, L, C]
+        query = query.flatten(start_dim=2).permute(0, 2, 1)        # [B, L, C]
+        ref_keys = ref_keys.flatten(start_dim=2).permute(0, 2, 1)  # [B, L, C]
+
         for _ in range(self.cfg.decoder_depth):
             coords1 = coords1.detach()
-            corr = corr_fn(coords1)  # index correlation volume
+            corr = corr_fn(coords1)  # [B, num_corr_levels, H, W]
             flow = coords1 - coords0
-            motion_features, current_value = self.update_block.get_motion_and_value(flow, corr)
-            current_value = current_value.unsqueeze(2)
-            value = current_value if ref_values is None else torch.cat([ref_values, current_value], dim=2)
-            # get global motion
-            # B, L, N, C
-            value = value.flatten(start_dim=2).permute(0, 2, 1).unsqueeze(2)
-            scale = self.att.scale * math.log(ref_keys.shape[1], self.train_avg_length)
-            hidden_states = flash_attn_func(query, ref_keys, value, dropout_p=0.0, softmax_scale=scale, causal=False)
-            hidden_states = hidden_states.squeeze(2).permute(0, 2, 1).reshape(motion_features.shape)
 
+            # Get motion features and value for this frame
+            motion_features, current_value = self.update_block.get_motion_and_value(flow, corr)
+            current_value = current_value.unsqueeze(2)  # [B, C, 1, H, W]
+
+            # Update value memory
+            value = current_value if ref_values is None else torch.cat([ref_values, current_value], dim=2)  # [B, C, N, H, W]
+            value = value.flatten(start_dim=2).permute(0, 2, 1)  # [B, L, C]
+
+            # Attention: query [B, L, C], key [B, L, C], value [B, L, C]
+            hidden_states, _ = self.att(query, ref_keys, value)  # [B, L, C]
+            hidden_states = hidden_states.permute(0, 2, 1).reshape(motion_features.shape)
+
+            # Fusion and update
             motion_features_global = motion_features + self.update_block.aggregator.gamma * hidden_states
             net, up_mask, delta_flow = self.update_block(net, inp, motion_features, motion_features_global)
-            # F(t+1) = F(t) + \Delta(t)
-            coords1 = coords1 + delta_flow
-            # upsample predictions
-            flow_up = self.upsample_flow(coords1 - coords0, up_mask)
 
+            coords1 = coords1 + delta_flow
+            flow_up = self.upsample_flow(coords1 - coords0, up_mask)
             flow_predictions.append(flow_up)
 
         if test_mode:
@@ -161,17 +149,14 @@ class MemFlowNet(nn.Module):
         else:
             return flow_predictions, current_value
 
+
     def initialize_flow(self, img):
-        """ Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""
         N, C, H, W = img.shape
         coords0 = coords_grid(N, H // 8, W // 8).to(img.device)
         coords1 = coords_grid(N, H // 8, W // 8).to(img.device)
-
-        # optical flow computed as difference: flow = coords1 - coords0
         return coords0, coords1
 
     def upsample_flow(self, flow, mask):
-        """ Upsample flow field [H/8, W/8, 2] -> [H, W, 2] using convex combination """
         N, _, H, W = flow.shape
         mask = mask.view(N, 1, 9, 8, 8, H, W)
         mask = torch.softmax(mask, dim=2)
@@ -182,3 +167,31 @@ class MemFlowNet(nn.Module):
         up_flow = torch.sum(mask * up_flow, dim=2)
         up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
         return up_flow.reshape(N, 2, 8 * H, 8 * W)
+
+    def forward(self, images, b, cfg):
+        query, key, net, inp = self.encode_context(images[:, :-1, ...])
+        coords0, coords1, fmaps = self.encode_features(images)
+        values = None
+        video_flow_predictions = []
+        for ti in range(0, cfg.input_frames - 1):
+            if ti < cfg.num_ref_frames:
+                ref_values = values
+                ref_keys = key[:, :, :ti + 1]
+            else:
+                indices = [torch.randperm(ti)[:cfg.num_ref_frames - 1] for _ in range(b)]
+                ref_values = torch.stack([
+                    values[bi, :, indices[bi]] for bi in range(b)
+                ], 0)
+                ref_keys = torch.stack([
+                    key[bi, :, indices[bi]] for bi in range(b)
+                ], 0)
+                ref_keys = torch.cat([ref_keys, key[:, :, ti].unsqueeze(2)], dim=2)
+
+            flow_pr, current_value = self.predict_flow(net[:, ti], inp[:, ti], coords0, coords1,
+                                                       fmaps[:, ti:ti + 2], query[:, :, ti], ref_keys,
+                                                       ref_values)
+            values = current_value if values is None else torch.cat([values, current_value], dim=2)
+            video_flow_predictions.append(torch.stack(flow_pr, dim=0))
+
+        video_flow_predictions = torch.stack(video_flow_predictions, dim=2)
+        return video_flow_predictions

@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from core.utils.utils import bilinear_sampler
+from core.depth_nets.core.utils.utils import bilinear_sampler
 
 
 class Combined_Geo_Encoding_Volume:
@@ -57,7 +57,7 @@ class Combined_Geo_Encoding_Volume:
         out = torch.cat(out_pyramid, dim=-1)
         return out.permute(0, 3, 1, 2).contiguous().float()
 
-    
+
     @staticmethod
     def corr(fmap1, fmap2):
         B, D, H, W1 = fmap1.shape

@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from core.update import BasicMultiUpdateBlock, LSTMMultiUpdateBlock
-from core.extractor import MultiBasicEncoder, Feature
-from core.geometry import Combined_Geo_Encoding_Volume
-from core.submodule import *
+from core.depth_nets.core.update import BasicMultiUpdateBlock, LSTMMultiUpdateBlock
+from core.depth_nets.core.extractor import MultiBasicEncoder, Feature
+from core.depth_nets.core.geometry import Combined_Geo_Encoding_Volume
+from core.depth_nets.core.submodule import *
 import time
-from nets.refinement import REMP
-from nets.MCCV import Mca_Camp
+from core.depth_nets.nets.refinement import REMP
+from core.depth_nets.nets.MCCV import Mca_Camp
 
 try:
     autocast = torch.cuda.amp.autocast
@@ -28,16 +28,16 @@ class hourglass(nn.Module):
                                              padding=1, stride=2, dilation=1),
                                    BasicConv(in_channels*2, in_channels*2, is_3d=True, bn=True, relu=True, kernel_size=3,
                                              padding=1, stride=1, dilation=1))
-                                    
+
         self.conv2 = nn.Sequential(BasicConv(in_channels*2, in_channels*4, is_3d=True, bn=True, relu=True, kernel_size=3,
                                              padding=1, stride=2, dilation=1),
                                    BasicConv(in_channels*4, in_channels*4, is_3d=True, bn=True, relu=True, kernel_size=3,
-                                             padding=1, stride=1, dilation=1))                             
+                                             padding=1, stride=1, dilation=1))
 
         self.conv3 = nn.Sequential(BasicConv(in_channels*4, in_channels*6, is_3d=True, bn=True, relu=True, kernel_size=3,
                                              padding=1, stride=2, dilation=1),
                                    BasicConv(in_channels*6, in_channels*6, is_3d=True, bn=True, relu=True, kernel_size=3,
-                                             padding=1, stride=1, dilation=1)) 
+                                             padding=1, stride=1, dilation=1))
 
 
         self.conv3_up = BasicConv(in_channels*6, in_channels*4, deconv=True, is_3d=True, bn=True,
@@ -93,7 +93,7 @@ class Mocha(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        
+
         context_dims = args.hidden_dims
 
         self.cnet = MultiBasicEncoder(output_dim=[args.hidden_dims, context_dims], norm_fn="batch", downsample=args.n_downsample)

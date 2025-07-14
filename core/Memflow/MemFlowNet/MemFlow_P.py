@@ -172,3 +172,31 @@ class MemFlowNet(nn.Module):
         up_flow = torch.sum(mask * up_flow, dim=2)
         up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
         return up_flow.reshape(N, 2, 8 * H, 8 * W)
+    def forward(self, image1, image2, iters=12, test_mode=False):
+        """
+        Args:
+            image1: tensor of shape [B, C, H, W] or [B, T, C, H, W]
+            image2: tensor of shape [B, C, H, W] or [B, T, C, H, W]
+            iters: number of refinement iterations (default: 12)
+            test_mode: whether to return last prediction only
+        """
+        # Pack inputs into a sequence
+        frames = torch.stack([image1, image2], dim=1)  # [B, 2, C, H, W]
+
+        coords0, coords1, fmaps = self.encode_features(frames)
+        query, key, net, inp = self.encode_context(frames)
+
+        # Truncate decoder depth if needed
+        decoder_depth_orig = self.cfg.decoder_depth
+        self.cfg.decoder_depth = iters
+
+        flow_predictions, current_value = self.predict_flow(
+            net, inp, coords0, coords1, fmaps, query, key, None, test_mode=test_mode
+        )
+
+        self.cfg.decoder_depth = decoder_depth_orig  # restore
+
+        if test_mode:
+            return flow_predictions  # final flow only
+        else:
+            return flow_predictions, current_value  # full flow pyramid

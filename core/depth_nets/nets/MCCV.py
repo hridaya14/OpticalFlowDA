@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from core.submodule import *
+from core.depth_nets.core.submodule import *
 
 class Mca_Camp(nn.Module):
     def __init__(self):

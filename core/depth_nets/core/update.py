@@ -58,14 +58,14 @@ class SepConvGRU(nn.Module):
         hx = torch.cat([h, x], dim=1)
         z = torch.sigmoid(self.convz1(hx))
         r = torch.sigmoid(self.convr1(hx))
-        q = torch.tanh(self.convq1(torch.cat([r*h, x], dim=1)))        
+        q = torch.tanh(self.convq1(torch.cat([r*h, x], dim=1)))
         h = (1-z) * h + z * q
 
         # vertical
         hx = torch.cat([h, x], dim=1)
         z = torch.sigmoid(self.convz2(hx))
         r = torch.sigmoid(self.convr2(hx))
-        q = torch.tanh(self.convq2(torch.cat([r*h, x], dim=1)))       
+        q = torch.tanh(self.convq2(torch.cat([r*h, x], dim=1)))
         h = (1-z) * h + z * q
 
         return h
@@ -141,7 +141,7 @@ class BasicMultiUpdateBlock(nn.Module):
         mask_feat_4 = self.mask_feat_4(net[0])
         return net, mask_feat_4, delta_disp
 
-from nets.mogrifier import Mogrifier
+from core.depth_nets.nets.mogrifier import Mogrifier
 class LSTM(nn.Module):
     def __init__(self, hidden_dim, input_dim, kernel_size=3):
         super(LSTM, self).__init__()

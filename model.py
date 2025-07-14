@@ -18,20 +18,20 @@ from core.utils.utils import transformation_from_parameters, disp_to_depth, filt
 # MemFlow imports
 from core.Memflow import build_network
 # Dispnet Imports
-from core.depth_nets.core.mocha_stereo import Mocha
+# from core.depth_nets.core.mocha_stereo import Mocha
 from loss import disp_pyramid_loss, sequence_loss
 
 # PoseNet Imports
-from core.posenet import PoseNet
+# from core.posenet import PoseNet
 from tool import BackprojectDepth, Logger, Project3D
 
 try:
-    from torch.cuda.amp.grad_scaler import GradScaler
+    from torch.amp.grad_scaler import GradScaler
 except:
     # dummy GradScaler for PyTorch < 1.6
     print("dummy GradScaler for PyTorch < 1.6")
     class GradScaler:
-        def __init__(self, enabled=True):
+        def __init__(self,device_type = "", enabled=True):
             pass
         def scale(self, loss):
             return loss
@@ -69,17 +69,17 @@ class Model(object):
         model_flow.cuda()
         model_flow.train()
 
-        # aanet
-        model_depth = Mocha(self.args)
-        print("Parameter Count: %d" % count_parameters(model_depth))
+        # # aanet
+        # model_depth = Mocha(self.args)
+        # print("Parameter Count: %d" % count_parameters(model_depth))
 
-        if self.args.restore_disp_ckpt is not None:
-            model_depth.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
+        # if self.args.restore_disp_ckpt is not None:
+        #     model_depth.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
 
-        model_depth = nn.DataParallel(model_depth, device_ids=self.args.gpus)
+        # model_depth = nn.DataParallel(model_depth, device_ids=self.args.gpus)
 
-        model_depth.cuda()
-        model_depth.train()
+        # model_depth.cuda()
+        # model_depth.train()
 
         # if self.args.stage != 'chairs':
         #     model_flow.module.freeze_bn()
@@ -90,30 +90,30 @@ class Model(object):
             pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
 
 
-        # disp optimizer
-        specific_params = list(filter(filter_specific_params,
-                                  model_depth.named_parameters()))
-        base_params = list(filter(filter_base_params,
-                                model_depth.named_parameters()))
-        specific_params = [kv[1] for kv in specific_params]  # kv is a tuple (key, value)
-        base_params = [kv[1] for kv in base_params]
+        # # disp optimizer
+        # specific_params = list(filter(filter_specific_params,
+        #                           model_depth.named_parameters()))
+        # base_params = list(filter(filter_base_params,
+        #                         model_depth.named_parameters()))
+        # specific_params = [kv[1] for kv in specific_params]  # kv is a tuple (key, value)
+        # base_params = [kv[1] for kv in base_params]
 
-        specific_lr = self.args.lr * 0.1
-        milestones = [400, 600, 800, 900]
-        params_group = [
-            {'params': base_params, 'lr': self.args.lr},
-            {'params': specific_params, 'lr': specific_lr},
-        ]
-        depth_optimizer = optim.Adam(params_group, weight_decay=self.args.wdecay*10)
-        depth_scheduler = optim.lr_scheduler.MultiStepLR(depth_optimizer, milestones=milestones, gamma=0.5, last_epoch=-1)
+        # specific_lr = self.args.lr * 0.1
+        # milestones = [400, 600, 800, 900]
+        # params_group = [
+        #     {'params': base_params, 'lr': self.args.lr},
+        #     {'params': specific_params, 'lr': specific_lr},
+        # ]
+        # depth_optimizer = optim.Adam(params_group, weight_decay=self.args.wdecay*10)
+        # depth_scheduler = optim.lr_scheduler.MultiStepLR(depth_optimizer, milestones=milestones, gamma=0.5, last_epoch=-1)
 
         # depth_scheduler = optim.lr_scheduler.OneCycleLR(depth_optimizer, self.args.lr, self.args.num_steps+100,
         #     pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
         # optimizer, scheduler = fetch_optimizer(self.args, model_flow)
 
         total_steps = 0
-        flow_scaler = GradScaler(enabled=self.args.mixed_precision)
-        depth_scaler = GradScaler(enabled=self.args.mixed_precision)
+        flow_scaler = GradScaler("cuda",enabled=self.args.mixed_precision)
+        # depth_scaler = GradScaler(enabled=self.args.mixed_precision)
         logger = Logger('checkpoints/', model_flow, flow_scheduler)
 
         VAL_FREQ = 5000
@@ -127,40 +127,30 @@ class Model(object):
         while should_keep_training:
             for i_batch, data_blob in enumerate(train_loader):
                 flow_optimizer.zero_grad()
-                depth_optimizer.zero_grad()
-                image1_left = data_blob['left_1'].cuda()
-                image2_left = data_blob['left_2'].cuda()
-                image1_right = data_blob['right_1'].cuda()
-                image2_right = data_blob['right_2'].cuda()
-                flow = data_blob['flow'].cuda()
-                valid = data_blob['valid'].cuda()
-                disp = data_blob['disp'].cuda()
+                # depth_optimizer.zero_grad()
+                images, flows, valids = [x.cuda() for x in data_blob]
                 # image1, image2, flow, valid, disp  = [x.cuda() for x in data_blob]
 
-                disp_mask = (disp > 0) & (disp < self.args.max_disp)
-
-                if self.args.load_pseudo_gt:
-                    pseudo_gt_disp = data_blob['pseudo_disp'].cuda()
-                    pseudo_mask = (pseudo_gt_disp > 0) & (pseudo_gt_disp < self.args.max_disp) & (~disp_mask)  # inverse mask
-
-                if not disp_mask.any():
-                    continue
+                # disp_mask = (disp > 0) & (disp < self.args.max_disp)
 
                 if add_noise:
                     stdv = np.random.uniform(0.0, 5.0)
-                    image1_left = (image1_left + stdv * torch.randn(*image1_left.shape).cuda()).clamp(0.0, 255.0)
-                    image2_left = (image2_left + stdv * torch.randn(*image2_left.shape).cuda()).clamp(0.0, 255.0)
-                    image1_right = (image1_right + stdv * torch.randn(*image1_right.shape).cuda()).clamp(0.0, 255.0)
-                    image2_right = (image2_right + stdv * torch.randn(*image2_right.shape).cuda()).clamp(0.0, 255.0)
+                    images = (images + stdv * torch.randn(*images.shape).cuda()).clamp(0.0, 255.0)
 
-                flow_predictions,_ = model_flow(image1_left, image2_left, iters=self.args.iters)
-                _,depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
+                output = {}
+                # flow prediction
+                images = 2 * (images / 255.0) - 1.0
+                b = images.shape[0]
 
-                flow_loss, flow_metrics = sequence_loss(flow_predictions, flow, valid, self.args.gamma)
-                if self.args.load_pseudo_gt:
-                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, pseudo_gt_disp, pseudo_mask, self.args.load_pseudo_gt)
-                else:
-                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, disp, disp_mask, self.args.load_pseudo_gt)
+                with torch.autocast("cuda",enabled=self.args.mixed_precision, dtype=torch.bfloat16):
+                    flow_predictions = model_flow.module(images, b, self.args)
+                # _,depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
+
+                flow_loss, flow_metrics, _ = sequence_loss(flow_predictions, flows, valids, self.args)
+                # if self.args.load_pseudo_gt:
+                #     disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, pseudo_gt_disp, pseudo_mask, self.args.load_pseudo_gt)
+                # else:
+                #     disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, disp, disp_mask, self.args.load_pseudo_gt)
 
                 # flow network update
                 flow_scaler.scale(flow_loss).backward()
@@ -171,20 +161,20 @@ class Model(object):
                 flow_scheduler.step()
                 flow_scaler.update()
 
-                # disp network update
-                depth_scaler.scale(adaptive_weight * disp_loss).backward()
-                depth_scaler.unscale_(depth_optimizer)
-                # torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
+                # # disp network update
+                # depth_scaler.scale(adaptive_weight * disp_loss).backward()
+                # depth_scaler.unscale_(depth_optimizer)
+                # # torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
 
-                depth_scaler.step(depth_optimizer)
-                depth_scheduler.step()
-                depth_scaler.update()
+                # depth_scaler.step(depth_optimizer)
+                # depth_scheduler.step()
+                # depth_scaler.update()
 
 
                 total_steps += 1
 
                 # print info
-                dict_metric = dict(flow_metrics, **disp_metrics)
+                dict_metric = dict(flow_metrics)
                 logger.push(dict_metric)
                 # logger.push(disp_metrics)
 
@@ -192,23 +182,23 @@ class Model(object):
                 # disp = depth_predictions[-1][-1].detach().cpu().numpy()  # [H, W]
                 # skimage.io.imsave('pred_disp/' + str(total_steps) + '.png', (disp * 256.).astype(np.uint16))
 
-                if total_steps % VAL_SUMMARY_FREQ == 0:
-                    img_summary = dict()
-                    img_summary['left_1'] = image1_left
-                    img_summary['right_1'] = image1_right
-                    img_summary['gt_flow'] = flow
-                    img_summary['pred_flow'] = flow_predictions[-1]
-                    img_summary['gt_disp'] = disp
-                    img_summary['pred_disp'] = depth_predictions[-1]
-                    logger.save_image('train', img_summary)
+                # if total_steps % VAL_SUMMARY_FREQ == 0:
+                #     img_summary = dict()
+                #     img_summary['left_1'] = image1_left
+                #     img_summary['right_1'] = image1_right
+                #     img_summary['gt_flow'] = flow
+                #     img_summary['pred_flow'] = flow_predictions[-1]
+                #     img_summary['gt_disp'] = disp
+                #     img_summary['pred_disp'] = depth_predictions[-1]
+                #     logger.save_image('train', img_summary)
 
 
-                if total_steps % VAL_FREQ == 0:
-                    FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft')
-                    torch.save(model_flow.state_dict(), FLOW_PATH)
+                # if total_steps % VAL_FREQ == 0:
+                #     FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'memflow')
+                #     torch.save(model_flow.state_dict(), FLOW_PATH)
 
-                    DISP_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'aanet')
-                    torch.save(model_depth.state_dict(), DISP_PATH)
+                #     DISP_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'mocha')
+                #     torch.save(model_depth.state_dict(), DISP_PATH)
 
 
                     # results = {}
@@ -230,13 +220,13 @@ class Model(object):
                     should_keep_training = False
                     break
 
-        logger.close()
+        # logger.close()
         FLOW_PATH = 'checkpoints/%s.pth' % 'memflow'
-        DISP_PATH = 'checkpoints/%s.pth' % 'mocha'
+        # DISP_PATH = 'checkpoints/%s.pth' % 'mocha'
         torch.save(model_flow.state_dict(), FLOW_PATH)
-        torch.save(model_depth.state_dict(), DISP_PATH)
+        # torch.save(model_depth.state_dict(), DISP_PATH)
 
-        return FLOW_PATH, DISP_PATH
+        return FLOW_PATH
 
 
 

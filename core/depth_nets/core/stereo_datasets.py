@@ -12,8 +12,8 @@ from pathlib import Path
 from glob import glob
 import os.path as osp
 
-from core.utils import frame_utils
-from core.utils.augmentor import FlowAugmentor, SparseFlowAugmentor
+from core.depth_nets.core.utils import frame_utils
+from core.depth_nets.core.utils.augmentor import FlowAugmentor, SparseFlowAugmentor
 
 
 class StereoDataset(data.Dataset):
@@ -30,7 +30,7 @@ class StereoDataset(data.Dataset):
         if reader is None:
             self.disparity_reader = frame_utils.read_gen
         else:
-            self.disparity_reader = reader        
+            self.disparity_reader = reader
 
         self.is_test = False
         self.init_seed = False
@@ -60,7 +60,7 @@ class StereoDataset(data.Dataset):
 
         index = index % len(self.image_list)
         disp = self.disparity_reader(self.disparity_list[index])
-        
+
         if isinstance(disp, tuple):
             disp, valid = disp
         else:
@@ -117,7 +117,7 @@ class StereoDataset(data.Dataset):
         copy_of_self.disparity_list = v * copy_of_self.disparity_list
         copy_of_self.extra_info = v * copy_of_self.extra_info
         return copy_of_self
-        
+
     def __len__(self):
         return len(self.image_list)
 
@@ -390,7 +390,7 @@ def fetch_dataloader(args):
             logging.info(f"Adding {len(new_dataset)} samples from Tartain Air")
         train_dataset = new_dataset if train_dataset is None else train_dataset + new_dataset
 
-    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, 
+    train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size,
         pin_memory=True, shuffle=True, num_workers=int(os.environ.get('SLURM_CPUS_PER_TASK', 6))-2, drop_last=True)
 
     logging.info('Training with %d image pairs' % len(train_dataset))
