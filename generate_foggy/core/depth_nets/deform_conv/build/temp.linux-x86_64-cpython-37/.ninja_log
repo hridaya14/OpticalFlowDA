@@ -1,0 +1,3 @@
+# ninja log v6
+0	9285	1752822554416535519	/home/ridoo14/Projects/OpticalFlowDA/generate_foggy/core/depth_nets/deform_conv/build/temp.linux-x86_64-cpython-37/src/deform_conv_cuda.o	5aa12cdbc270f148
+1	9054	1752822617515687208	/home/ridoo14/Projects/OpticalFlowDA/generate_foggy/core/depth_nets/deform_conv/build/temp.linux-x86_64-cpython-37/src/deform_conv_cuda.o	5f563693824cd92a
