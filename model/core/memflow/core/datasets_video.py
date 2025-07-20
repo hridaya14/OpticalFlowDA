@@ -7,9 +7,9 @@ import random
 from glob import glob
 import os.path as osp
 from torch.utils.data.distributed import DistributedSampler
-from core.utils import frame_utils
-from core.utils.augmentor import FlowAugmentor, SparseFlowAugmentor
-from core.utils.utils import forward_interpolate
+from .utils import frame_utils
+from .utils.augmentor_video import FlowAugmentor, SparseFlowAugmentor
+from .utils.utils import forward_interpolate
 import pickle
 
 
@@ -503,7 +503,7 @@ class KITTI(FlowDataset):
     def __init__(self, aug_params=None, input_frames=5, forward_warp=False):
         super(KITTI, self).__init__(aug_params=aug_params, input_frames=input_frames, sparse=True, forward_warp=forward_warp)
 
-        root = 'datasets/KITTI-multiview/'
+        root = 'datasets/KITTI/'
 
         self.image_list = []
         self.flow_list = []
@@ -512,7 +512,7 @@ class KITTI(FlowDataset):
         for idx_list in range(200):
             for idx_image in range(0, input_frames - 1):
                 self.image_list.append(
-                    [(root + "training/image_2/000{:03}_{:02}.png".format(idx_list, i - idx_image + 10)) for
+                    [(root + "KITTI-multiview/training/image_2/000{:03}_{:02}.png".format(idx_list, i - idx_image + 10)) for
                      i in range(input_frames)])
                 self.flow_list.append(
                     [root + "training/flow_occ/000{:03}_10.png".format(idx_list)] * (input_frames - 1))
@@ -527,7 +527,7 @@ class KITTITest(FlowDataset):
     def __init__(self, aug_params=None):
         super(KITTITest, self).__init__(aug_params=aug_params, sparse=True)
 
-        root = 'datasets/KITTI-multiview/'
+        root = 'datasets/KITTI/'
 
         self.image_list = []
         self.flow_list = []
@@ -535,7 +535,7 @@ class KITTITest(FlowDataset):
 
         for idx_list in range(200):
             self.image_list.append(
-                [(root + "training/image_2/000{:03}_{:02}.png".format(idx_list, i)) for i in range(0, 12)])  # 8
+                [(root + "KITTI-multiview/training/image_2/000{:03}_{:02}.png".format(idx_list, i)) for i in range(0, 12)])  # 8
             self.flow_list.append(
                 [root + "training/flow_occ/000{:03}_10.png".format(idx_list)] * 11)
             self.has_gt_list.append([False] * 10 + [True])
