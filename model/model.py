@@ -3,10 +3,13 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+from core.utils.logger import Logger
 from model.core.ur2p_inspired.model import FogFormerEnhancer
+from core.memflow.core.Networks import build_network
 import torch
 import torch.nn as nn
 import core.datasets_video as datasets
+from .datasets import fetch_dataloader as loader
 from core.loss import sequence_loss
 from core.optimizer import fetch_optimizer
 from core.utils.misc import process_cfg
@@ -47,6 +50,11 @@ def count_parameters(model):
 class Model:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.feature_criterion = nn.MSELoss()
+        self.lambda_fmaps = 1.0
+        self.lambda_inp = 0.1
+        self.lambda_net = 0.05
+
 
     @staticmethod
     def cleanup():
@@ -236,10 +244,17 @@ class Model:
         return
 
 
-    def train_enhancement_module(self,gpu, cfg):
+    def guided_learning(self, gpu, cfg):
 
         rank = cfg.node_rank * cfg.gpus + gpu
         torch.cuda.set_device(rank)
+
+        guide_model = build_network(cfg)
+        guide_model.cuda(rank)
+        guide_model.eval()
+
+        for p in guide_model.parameters():
+            p.requires_grad = False
 
         if cfg.DDP:
             dist.init_process_group(backend='nccl',
@@ -247,15 +262,92 @@ class Model:
                                     world_size=cfg.world_size,
                                     rank=rank,
                                     group_name='mtorch')
-            model = nn.SyncBatchNorm.convert_sync_batchnorm(build_network(cfg)).cuda()
-            model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+            child_model = nn.SyncBatchNorm.convert_sync_batchnorm(build_network(cfg)).cuda()
+            child_model = nn.parallel.DistributedDataParallel(child_model, device_ids=[rank])
+            enhancer_model = FogFormerEnhancer()
+            enhancer_model = nn.SyncBatchNorm.convert_sync_batchnorm(enhancer_model).cuda(rank)
+            enhancer_model = nn.parallel.DistributedDataParallel(enhancer_model, device_ids=[rank])
 
+        loss_func = sequence_loss
 
         if rank == 0:
-            loguru_logger.info("Parameter Count: %d" % count_parameters(model))
+            loguru_logger.info("Parameter Count: %d" % count_parameters(child_model))
 
-        # Build enhancement module
-        enhance_model = FogFormerEnhancer()
+        # Load Pretrained Guided Model
+        if cfg.restore_guide_ckpt is not None:
+            print("[Loading ckpt from {}]".format(cfg.restore_ckpt))
+            ckpt = torch.load(cfg.restore_guide_ckpt, map_location='cpu')
+            ckpt_model = ckpt['model'] if 'model' in ckpt else ckpt
+            if 'module' in list(ckpt_model.keys())[0]:
+                guide_model.load_state_dict(ckpt_model, strict=True)
+            else:
+                guide_model.module.load_state_dict(ckpt_model, strict=True)
+
+
+        # Load Child model
+        if cfg.restore_child_ckpt is not None:
+            print("[Loading ckpt from {}]".format(cfg.restore_ckpt))
+            ckpt = torch.load(cfg.restore_child_ckpt, map_location='cpu')
+            ckpt_model = ckpt['model'] if 'model' in ckpt else ckpt
+            if 'module' in list(ckpt_model.keys())[0]:
+                child_model.load_state_dict(ckpt_model, strict=True)
+            else:
+                child_model.module.load_state_dict(ckpt_model, strict=True)
+
+
+        child_model.train()
+
+        if cfg.DDP:
+            train_sampler, train_loader = loader(cfg, DDP=cfg.DDP, rank=rank)
+        else:
+            train_loader = loader(cfg, DDP=cfg.DDP, rank=rank)
+
+
+        optimizer, scheduler = fetch_optimizer(child_model, cfg.trainer)
+
+        total_steps = 0
+        scaler = GradScaler(enabled=cfg.mixed_precision)
+        logger = Logger(child_model, scheduler, cfg)
+
+        epoch = 0
+
+        should_keep_training = True
+        while should_keep_training:
+            epoch += 1
+
+            if cfg.DDP:
+                train_sampler.set_epoch(epoch)
+
+            for i_batch, data_blob in enumerate(train_loader):
+                optimizer.zero_grad()
+                clean_imgs, foggy_images, flows, valids = [x.cuda() for x in data_blob]
+
+                enhanced_imgs = enhancer_model(foggy_images)
+
+                with torch.cuda.amp.autocast(enabled=cfg.mixed_precision, dtype=torch.bfloat16):
+
+                    with torch.no_grad():
+                        guide_preds, guide_net, guide_inp, guide_fmaps = guide_model(clean_imgs)
+
+                    enhanced_imgs = 2 * (enhanced_imgs / 255.0) - 1.0
+                    b = enhanced_imgs.shape[0]
+
+                    query, key, net, inp = child_model.module.encode_context(enhanced_imgs[:, :-1, ...])
+
+                    coords0, coords1, fmaps = child_model.module.encode_features(enhanced_imgs)
+
+                    fmaps_loss = self.feature_criterion(fmaps, guide_fmaps)
+
+                    inp_loss = self.feature_criterion(inp, guide_inp)
+                    net_loss = self.feature_criterion(net, guide_net)
+
+                    prior_loss = (
+                        self.lambda_fmaps * fmaps_loss +
+                        self.lambda_inp * inp_loss +
+                        self.lambda_net * net_loss
+                    )
+
+
 
 
 

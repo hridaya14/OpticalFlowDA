@@ -182,3 +182,40 @@ class MemFlowNet(nn.Module):
         up_flow = torch.sum(mask * up_flow, dim=2)
         up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
         return up_flow.reshape(N, 2, 8 * H, 8 * W)
+
+    def forward(self,images, cfg, return_features = True):
+        images = 2 * (images / 255.0) - 1.0
+        b = images.shape[0]
+        # B*C*N-1*H*W,                    B*N-1*C*H*W
+        query, key, net, inp = self.encode_context(images[:, :-1, ...])
+
+        coords0, coords1, fmaps = self.encode_features(images)
+        values = None
+        video_flow_predictions = []  # frame by frame
+        for ti in range(0, cfg.input_frames - 1):
+            if ti < cfg.num_ref_frames:
+                ref_values = values
+                ref_keys = key[:, :, :ti + 1]
+            else:
+                indices = [torch.randperm(ti)[:cfg.num_ref_frames - 1] for _ in range(b)]
+                ref_values = torch.stack([
+                    values[bi, :, indices[bi]] for bi in range(b)
+                ], 0)
+                ref_keys = torch.stack([
+                    key[bi, :, indices[bi]] for bi in range(b)
+                ], 0)
+                ref_keys = torch.cat([ref_keys, key[:, :, ti].unsqueeze(2)], dim=2)
+
+            # predict flow from frame ti to frame ti+1
+            flow_pr, current_value = self.predict_flow(net[:, ti], inp[:, ti], coords0, coords1,
+                                                        fmaps[:, ti:ti + 2], query[:, :, ti], ref_keys,
+                                                                ref_values)
+            values = current_value if values is None else torch.cat([values, current_value], dim=2)
+            video_flow_predictions.append(torch.stack(flow_pr, dim=0))
+        # loss function
+        video_flow_predictions = torch.stack(video_flow_predictions, dim=2)
+
+        if return_features:
+            return video_flow_predictions, net, inp, fmaps
+        else:
+            return video_flow_predictions

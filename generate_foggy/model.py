@@ -82,18 +82,18 @@ class Model(object):
 
         self.K_ = torch.from_numpy(K).unsqueeze(dim=0)
         self.K = torch.cat([self.K_, self.K_], 0).cuda()
-        
+
         self.inv_K_ = torch.from_numpy(inv_K).unsqueeze(dim=0)
         self.inv_K = torch.cat([self.inv_K_, self.inv_K_], 0).cuda()
         # print()
-    
+
     # Note that: when you use clean images without GT for training the network, you need to replace the flow loss with photometric loss.
     # train depth and flow network
     def stage_1_train(self):
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft
         model_flow = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -108,12 +108,12 @@ class Model(object):
         # aanet
         model_depth = AANet(self.args)
         print("Parameter Count: %d" % count_parameters(model_depth))
-       
+
         if self.args.restore_disp_ckpt is not None:
             model_depth.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
-            
+
         model_depth = nn.DataParallel(model_depth, device_ids=self.args.gpus)
-        
+
         model_depth.cuda()
         model_depth.train()
 
@@ -189,8 +189,8 @@ class Model(object):
                     image1_right = (image1_right + stdv * torch.randn(*image1_right.shape).cuda()).clamp(0.0, 255.0)
                     image2_right = (image2_right + stdv * torch.randn(*image2_right.shape).cuda()).clamp(0.0, 255.0)
 
-                _, flow_predictions = model_flow(image1_left, image2_left, iters=self.args.iters)      
-                depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H      
+                _, flow_predictions = model_flow(image1_left, image2_left, iters=self.args.iters)
+                depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
 
                 flow_loss, flow_metrics = sequence_loss(flow_predictions, flow, valid, self.args.gamma)
                 if self.args.load_pseudo_gt:
@@ -200,24 +200,24 @@ class Model(object):
 
                 # flow network update
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 flow_scheduler.step()
                 flow_scaler.update()
 
-                # disp network update 
+                # disp network update
                 depth_scaler.scale(adaptive_weight * disp_loss).backward()
-                depth_scaler.unscale_(depth_optimizer)                
+                depth_scaler.unscale_(depth_optimizer)
                 # torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
-                
+
                 depth_scaler.step(depth_optimizer)
                 depth_scheduler.step()
                 depth_scaler.update()
-                
+
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(flow_metrics, **disp_metrics)
                 logger.push(dict_metric)
@@ -237,7 +237,7 @@ class Model(object):
                     img_summary['pred_disp'] = depth_predictions[-1]
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft')
                     torch.save(model_flow.state_dict(), FLOW_PATH)
@@ -245,7 +245,7 @@ class Model(object):
                     DISP_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'aanet')
                     torch.save(model_depth.state_dict(), DISP_PATH)
 
-                    
+
                     # results = {}
                     # for val_dataset in self.args.validation:
                     #     if val_dataset == 'chairs':
@@ -256,7 +256,7 @@ class Model(object):
                     #         results.update(evaluate.validate_kitti(model_flow.module))
 
                     # logger.write_dict(results)
-                    
+
                     # model_flow.train()
                     # if self.args.stage != 'chairs':
                     #     model_flow.module.freeze_bn()
@@ -277,11 +277,11 @@ class Model(object):
     # train depth, flow network and ego-motion
     def stage_2_train(self):
         fx = 721.53
-        baseline = 53.72 
+        baseline = 53.72
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft
         model_flow = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -290,17 +290,17 @@ class Model(object):
         # load model
         if self.args.restore_flow_ckpt is not None:
             model_flow.load_state_dict(torch.load(self.args.restore_flow_ckpt), strict=False)
-            
+
         # aanet
         model_depth = AANet(self.args)
         print("Parameter Count: %d" % count_parameters(model_depth))
-       
+
         if self.args.restore_disp_ckpt is not None:
             model_depth.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
-            
+
         model_depth = nn.DataParallel(model_depth, device_ids=self.args.gpus)
-        
-        
+
+
         # posenet
         model_pose = {}
         model_pose['encoder'] = PoseNet(self.args)['pose_encoder']
@@ -308,7 +308,7 @@ class Model(object):
         model_pose['encoder'].load_state_dict(torch.load(self.args.restore_pose_encoder_ckpt), strict=False)
         model_pose['decoder'].load_state_dict(torch.load(self.args.restore_pose_decoder_ckpt), strict=False)
         print("Parameter Count: %d" % count_parameters(model_pose['encoder']))
-        
+
 
         model_flow.cuda()
         model_flow.train()
@@ -401,9 +401,9 @@ class Model(object):
                     image1_right = (image1_right + stdv * torch.randn(*image1_right.shape).cuda()).clamp(0.0, 255.0)
                     image2_right = (image2_right + stdv * torch.randn(*image2_right.shape).cuda()).clamp(0.0, 255.0)
 
-                _, flow_predictions = model_flow(image1_left, image2_left, iters=self.args.iters)      
-                depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H      
-                
+                _, flow_predictions = model_flow(image1_left, image2_left, iters=self.args.iters)
+                depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
+
                 # 计算pose，不参与训练
                 with torch.no_grad():
                     adjacent_images = torch.cat([image1_left, image2_left], 1)
@@ -420,7 +420,7 @@ class Model(object):
                     tgt_pix_coords = self.project_3d(cam_points, self.K, pred_poses)
                     rigid_flow_predictions = tgt_pix_coords.cuda() - src_pix_coords.cuda()
                     rigid_flow_predictions = rigid_flow_predictions.permute(0, 3, 1, 2)
-                    
+
 
                 flow_loss, flow_metrics = sequence_loss(flow_predictions, flow, valid, self.args.gamma)
                 if self.args.load_pseudo_gt:
@@ -434,27 +434,27 @@ class Model(object):
 
                 # flow network update
                 flow_loss = flow_loss + geo_motion_loss
-                
+
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 flow_scheduler.step()
                 flow_scaler.update()
 
-                # disp network update 
+                # disp network update
                 depth_scaler.scale(adaptive_weight*disp_loss).backward()
-                depth_scaler.unscale_(depth_optimizer)                
+                depth_scaler.unscale_(depth_optimizer)
                 # torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
-                
+
                 depth_scaler.step(depth_optimizer)
                 depth_scheduler.step()
                 depth_scaler.update()
 
 
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(flow_metrics, **disp_metrics)
                 dict_metric = dict(dict_metric, **motion_metrics)
@@ -472,7 +472,7 @@ class Model(object):
                     img_summary['pred_rigid_flow'] = rigid_flow_predictions
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft')
                     torch.save(model_flow.state_dict(), FLOW_PATH)
@@ -480,7 +480,7 @@ class Model(object):
                     DISP_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'aanet')
                     torch.save(model_depth.state_dict(), DISP_PATH)
 
-                    
+
                     # results = {}
                     # for val_dataset in self.args.validation:
                     #     if val_dataset == 'chairs':
@@ -491,7 +491,7 @@ class Model(object):
                     #         results.update(evaluate.validate_kitti(model_flow.module))
 
                     # logger.write_dict(results)
-                    
+
                     # model_flow.train()
                     # if self.args.stage != 'chairs':
                     #     model_flow.module.freeze_bn()
@@ -507,21 +507,21 @@ class Model(object):
         torch.save(model_depth.state_dict(), DISP_PATH)
 
         return FLOW_PATH, DISP_PATH
-    
+
 
     def generate_depth_foggy_images(self):
         if not os.path.isdir('generate_images'):
             os.mkdir('generate_images')
-        
+
         if not os.path.isdir('pred_depth'):
             os.mkdir('pred_depth')
-        
+
         if not os.path.isdir('pred_disp'):
             os.mkdir('pred_disp')
-        
+
         fx = 721.53
         baseline = 53.72 # cm
-        
+
         k = 0.88  #atmospheric
         beta = 0.06   #attenuation factor
 
@@ -541,10 +541,10 @@ class Model(object):
         # aanet
         model_disp = AANet(self.args)
         print("Parameter Count: %d" % count_parameters(model_disp))
-       
+
         if self.args.restore_disp_ckpt is not None:
             model_disp.load_state_dict(torch.load(self.args.restore_disp_ckpt), strict=False)
-            
+
         model_disp = nn.DataParallel(model_disp, device_ids=self.args.gpus)
 
         model_disp.cuda()
@@ -553,7 +553,7 @@ class Model(object):
         for i, sample_name in enumerate(all_samples):
             if i % 100 == 0:
                 print('=> Inferencing %d/%d' % (i, num_samples))
-            
+
             left_name = sample_name
             right_name = left_name.replace('image_2', 'image_3')
 
@@ -586,30 +586,30 @@ class Model(object):
                 # Pad size: (left_pad, right_pad, top_pad, bottom_pad)
                 left = F.pad(left, (0, right_pad, top_pad, 0))
                 right = F.pad(right, (0, right_pad, top_pad, 0))
-            
+
             with torch.no_grad():
                 pred_disp = model_disp(left, right)[-1]
-            
-            
-            
+
+
+
             if pred_disp.size(-1) < left.size(-1):
                 pred_disp = pred_disp.unsqueeze(1)  # [B, 1, H, W]
                 pred_disp = F.interpolate(pred_disp, (left.size(-2), left.size(-1)),
                                         mode='bilinear') * (left.size(-1) / pred_disp.size(-1))
                 pred_disp = pred_disp.squeeze(1)  # [B, H, W]
-            
+
             # Crop
             if ori_height < img_height or ori_width < img_width:
                 if right_pad != 0:
                     pred_disp = pred_disp[:, top_pad:, :-right_pad]
                 else:
                     pred_disp = pred_disp[:, top_pad:]
-            
+
             disp = pred_disp[0].detach().cpu().numpy()  # [H, W]
             saved_disp_name = 'pred_disp/' + os.path.basename(left_name)
             disp = (disp * 256.).astype(np.uint16)
             skimage.io.imsave(saved_disp_name, disp)
-            
+
             saved_depth_name = 'pred_depth/' + os.path.basename(left_name)
             depth = 1/disp * fx * baseline
             im_color=cv2.applyColorMap(cv2.convertScaleAbs(depth,alpha=15),cv2.COLORMAP_BONE)
@@ -621,14 +621,14 @@ class Model(object):
             cv2.waitKey(3)
             cv2.imwrite(saved_foggy_name, fog)
 
-   
+
     # dataset: kitti_foggy
     # using domain adaptation to train flow network of degraded domain
     def stage_4_train(self):
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft-clean
         model_flow_clean = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -644,7 +644,7 @@ class Model(object):
 
         if self.args.restore_flow_synimg_ckpt is not None:
             model_flow_foggy.load_state_dict(torch.load(self.args.restore_flow_synimg_ckpt), strict=False)
-             
+
 
         model_flow_clean.cuda()
         model_flow_clean.eval()
@@ -690,29 +690,29 @@ class Model(object):
                     image2_clean = (image2_clean + stdv * torch.randn(*image2_clean.shape).cuda()).clamp(0.0, 255.0)
                     image1_foggy = (image1_foggy + stdv * torch.randn(*image1_foggy.shape).cuda()).clamp(0.0, 255.0)
                     image2_foggy = (image2_foggy + stdv * torch.randn(*image2_foggy.shape).cuda()).clamp(0.0, 255.0)
-                
+
                 with torch.no_grad():
                     _, flow_clean_predictions = model_flow_clean(image1_clean, image2_clean, iters=20, test_mode=True)
-               
+
                 # 计算浓雾天图像光流
-                _, flow_foggy_predictions = model_flow_foggy(image1_foggy, image2_foggy, iters=self.args.iters)     
-                
+                _, flow_foggy_predictions = model_flow_foggy(image1_foggy, image2_foggy, iters=self.args.iters)
+
                 flow_loss, flow_metrics = sequence_loss(flow_foggy_predictions, flow, valid, self.args.gamma)
                 flow_DA_loss, flow_DA_metrics = cross_domain_consis_loss(flow_foggy_predictions[-1], flow_clean_predictions)
-                    
+
                 # flow network update
                 flow_loss = flow_loss + flow_DA_loss
-                
+
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow_foggy.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 flow_scheduler.step()
                 flow_scaler.update()
 
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(flow_metrics, **flow_DA_metrics)
                 logger.push(dict_metric)
@@ -725,7 +725,7 @@ class Model(object):
                     img_summary['pred_flow'] = flow_foggy_predictions[-1]
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     FLOW_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft_synfog')
                     torch.save(model_flow_foggy.state_dict(), FLOW_PATH)
@@ -739,9 +739,9 @@ class Model(object):
         torch.save(model_flow_foggy.state_dict(), FLOW_PATH)
 
         return FLOW_PATH
-       
 
-    
+
+
     # dataset: foggy-kitti and real images
     # using pseudo stategy to train flow network of real degraded domain
     # train temporal cost volume, pseudo and monunent update.
@@ -749,7 +749,7 @@ class Model(object):
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft-foggy
         model_flow_syn = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -762,8 +762,8 @@ class Model(object):
         # load model
         if self.args.restore_flow_synimg_ckpt is not None:
             model_flow_syn.load_state_dict(torch.load(self.args.restore_flow_synimg_ckpt), strict=False)
-             
-             
+
+
         if self.args.restore_flow_realimg_ckpt is not None:
             model_flow_real.load_state_dict(torch.load(self.args.restore_flow_realimg_ckpt), strict=False)
 
@@ -817,7 +817,7 @@ class Model(object):
                     image2_syn = (image2_syn + stdv * torch.randn(*image2_syn.shape).cuda()).clamp(0.0, 255.0)
                     image1_real = (image1_real + stdv * torch.randn(*image1_real.shape).cuda()).clamp(0.0, 255.0)
                     image2_real = (image2_real + stdv * torch.randn(*image2_real.shape).cuda()).clamp(0.0, 255.0)
-                
+
                 # with torch.no_grad():
                 _, flow_syn_predictions = model_flow_syn(image1_syn, image2_syn, iters=self.args.iters)
 
@@ -825,9 +825,9 @@ class Model(object):
                 with torch.no_grad():
                     _, pseudo_flow_predictions = model_flow_syn(image1_real, image2_real, iters=self.args.iters)
 
-                _, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)     
-                
-                
+                _, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)
+
+
 
                 # 损失：动量更新、epe、kl散度、伪标签
                 # epe between gt and syn flow
@@ -838,21 +838,21 @@ class Model(object):
 
                 # kl散度
                 # flow_DA_loss, flow_DA_metrics = cross_domain_consis_loss(flow_foggy_predictions[-1], flow_clean_predictions)
-                
+
                 # flow network update
                 flow_loss = syn_flow_loss + pseudo_loss
-                
+
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow_syn.parameters(), self.args.clip)
                 torch.nn.utils.clip_grad_norm_(model_flow_real.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 flow_scheduler.step()
                 flow_scaler.update()
 
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(syn_flow_metrics, **pseudo_metrics)
                 logger.push(dict_metric)
@@ -865,11 +865,11 @@ class Model(object):
                     img_summary['pred_real_flow'] = flow_real_predictions[-1]
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     SYN_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft_synfog')
                     torch.save(model_flow_syn.state_dict(), SYN_PATH)
-                
+
                 if total_steps % VAL_FREQ == 0:
                     REAL_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft_realfog')
                     torch.save(model_flow_real.state_dict(), REAL_PATH)
@@ -898,7 +898,7 @@ class Model(object):
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft-foggy
         model_flow_syn = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -911,8 +911,8 @@ class Model(object):
         # load model
         if self.args.restore_flow_synimg_ckpt is not None:
             model_flow_syn.load_state_dict(torch.load(self.args.restore_flow_synimg_ckpt), strict=False)
-             
-             
+
+
         if self.args.restore_flow_realimg_ckpt is not None:
             model_flow_real.load_state_dict(torch.load(self.args.restore_flow_realimg_ckpt), strict=False)
 
@@ -926,7 +926,7 @@ class Model(object):
         if self.args.stage != 'chairs':
             model_flow_syn.module.freeze_bn()
             model_flow_real.module.freeze_bn()
-        
+
         model_ema = EMA(model_flow_real, 0.999)
         model_ema.register()
         # training process
@@ -971,7 +971,7 @@ class Model(object):
                     image2_syn = (image2_syn + stdv * torch.randn(*image2_syn.shape).cuda()).clamp(0.0, 255.0)
                     image1_real = (image1_real + stdv * torch.randn(*image1_real.shape).cuda()).clamp(0.0, 255.0)
                     image2_real = (image2_real + stdv * torch.randn(*image2_real.shape).cuda()).clamp(0.0, 255.0)
-                
+
                 # with torch.no_grad():
                 cost_volume_syn, flow_syn_predictions = model_flow_syn(image1_syn, image2_syn, iters=self.args.iters)
 
@@ -979,9 +979,9 @@ class Model(object):
                 with torch.no_grad():
                     _, pseudo_flow_predictions = model_flow_syn(image1_real, image2_real, iters=self.args.iters)
 
-                cost_volume_real, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)     
-                
-                
+                cost_volume_real, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)
+
+
 
                 # 损失：动量更新、epe、kl散度、伪标签
                 # epe between gt and syn flow
@@ -989,7 +989,7 @@ class Model(object):
 
                 # self-supervised pseduo loss
                 pseudo_loss, pseudo_metrics = self_supervised_loss(flow_real_predictions[-1], pseudo_flow_predictions[-1])
-                
+
                 # kl散度
                 # 计算分布
                 # print(cost_volume_syn[-1].shape)
@@ -1002,24 +1002,24 @@ class Model(object):
                 kl_metrics = {
                     'kl_loss': loss_kl,
                 }
-                
+
                 # flow network update
                 flow_loss = syn_flow_loss + pseudo_loss + loss_kl
-                
+
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow_syn.parameters(), self.args.clip)
                 # torch.nn.utils.clip_grad_norm_(model_flow_real.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 # EMA update
                 model_ema.update()
-                
+
                 flow_scheduler.step()
                 flow_scaler.update()
 
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(syn_flow_metrics, **pseudo_metrics)
                 dict_metric = dict(dict_metric, **kl_metrics)
@@ -1033,11 +1033,11 @@ class Model(object):
                     img_summary['pred_real_flow'] = flow_real_predictions[-1]
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     SYN_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft_synfog')
                     torch.save(model_flow_syn.state_dict(), SYN_PATH)
-                
+
                 if total_steps % VAL_FREQ == 0:
                     model_ema.apply_shadow()
                     REAL_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'raft_realfog')
@@ -1051,25 +1051,25 @@ class Model(object):
         logger.close()
         SYN_PATH = 'checkpoints/%s.pth' % 'raft_synfog'
         torch.save(model_flow_syn.state_dict(), SYN_PATH)
-        
+
         model_ema.apply_shadow()
         REAL_PATH = 'checkpoints/%s.pth' % 'raft_realfog'
         torch.save(model_flow_real.state_dict(), REAL_PATH)
 
         return SYN_PATH, REAL_PATH
-    
 
 
-    
+
+
     # dataset: foggy-kitti and real images
     # using pseudo stategy to train flow network of real degraded domain
-    # train temporal cost volume, pseudo and monunent update, kl散度.  
+    # train temporal cost volume, pseudo and monunent update, kl散度.
     # add spatial context feature
     def stage_7_train(self):
         # dataset_loader
         train_loader = datasets.fetch_dataloader(self.args)
         # train_loader = datasets.fetch_clean_dataloader(self.args)
-        
+
         # param setting
         # raft-foggy
         model_flow_syn = nn.DataParallel(RAFT(self.args), device_ids=self.args.gpus)
@@ -1082,8 +1082,8 @@ class Model(object):
         # load model
         if self.args.restore_flow_synimg_ckpt is not None:
             model_flow_syn.load_state_dict(torch.load(self.args.restore_flow_synimg_ckpt), strict=False)
-             
-             
+
+
         if self.args.restore_flow_realimg_ckpt is not None:
             model_flow_real.load_state_dict(torch.load(self.args.restore_flow_realimg_ckpt), strict=False)
 
@@ -1097,7 +1097,7 @@ class Model(object):
         if self.args.stage != 'chairs':
             model_flow_syn.module.freeze_bn()
             model_flow_real.module.freeze_bn()
-        
+
         model_ema = EMA(model_flow_real, 0.999)
         model_ema.register()
         # training process
@@ -1142,7 +1142,7 @@ class Model(object):
                     image2_syn = (image2_syn + stdv * torch.randn(*image2_syn.shape).cuda()).clamp(0.0, 255.0)
                     image1_real = (image1_real + stdv * torch.randn(*image1_real.shape).cuda()).clamp(0.0, 255.0)
                     image2_real = (image2_real + stdv * torch.randn(*image2_real.shape).cuda()).clamp(0.0, 255.0)
-                
+
                 # with torch.no_grad():
                 cost_volume_syn, flow_syn_predictions = model_flow_syn(image1_syn, image2_syn, iters=self.args.iters)
 
@@ -1150,9 +1150,9 @@ class Model(object):
                 with torch.no_grad():
                     _, pseudo_flow_predictions = model_flow_syn(image1_real, image2_real, iters=self.args.iters)
 
-                cost_volume_real, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)     
-                
-                
+                cost_volume_real, flow_real_predictions = model_flow_real(image1_real, image2_real, iters=self.args.iters)
+
+
 
                 # 损失：动量更新、epe、kl散度、伪标签
                 # epe between gt and syn flow
@@ -1160,7 +1160,7 @@ class Model(object):
 
                 # self-supervised pseduo loss
                 pseudo_loss, pseudo_metrics = self_supervised_loss(flow_real_predictions[-1], pseudo_flow_predictions[-1])
-                
+
                 # kl散度
                 # 计算分布
                 distribution_syn = torch.histc(cost_volume_syn[-1])
@@ -1172,24 +1172,24 @@ class Model(object):
                 kl_metrics = {
                     'kl_loss': loss_kl,
                 }
-                
+
                 # flow network update
                 flow_loss = syn_flow_loss + pseudo_loss + loss_kl
-                
+
                 flow_scaler.scale(flow_loss).backward()
-                flow_scaler.unscale_(flow_optimizer)                
+                flow_scaler.unscale_(flow_optimizer)
                 torch.nn.utils.clip_grad_norm_(model_flow_syn.parameters(), self.args.clip)
                 # torch.nn.utils.clip_grad_norm_(model_flow_real.parameters(), self.args.clip)
-                
+
                 flow_scaler.step(flow_optimizer)
                 # EMA update
                 model_ema.update()
                 flow_scheduler.step()
-                
+
                 flow_scaler.update()
 
                 total_steps += 1
-                
+
                 # print info
                 dict_metric = dict(syn_flow_metrics, **pseudo_metrics)
                 dict_metric = dict(dict_metric, **kl_metrics)
@@ -1203,11 +1203,11 @@ class Model(object):
                     img_summary['pred_real_flow'] = flow_real_predictions[-1]
                     logger.save_image('train', img_summary)
 
-                    
+
                 if total_steps % VAL_FREQ == 0:
                     SYN_PATH = 'checkpoints/%d_%s.pth' % (total_steps+1, 'ucda_flow_syn')
                     torch.save(model_flow_syn.state_dict(), SYN_PATH)
-                
+
                 if total_steps % VAL_FREQ == 0:
                     # 更新EMA策略更新权重保存模型
                     model_ema.apply_shadow()

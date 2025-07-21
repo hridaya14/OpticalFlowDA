@@ -8,8 +8,8 @@ from glob import glob
 import os.path as osp
 from torch.utils.data.distributed import DistributedSampler
 from .utils import frame_utils
-from .utils.augmentor_video import FlowAugmentor, SparseFlowAugmentor
-from .utils.utils import forward_interpolate
+from .core.utils.augmentor_video import FlowAugmentor, SparseFlowAugmentor
+from .core.utils.utils import forward_interpolate
 import pickle
 
 
