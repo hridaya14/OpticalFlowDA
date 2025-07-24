@@ -28,7 +28,7 @@ class Logger:
         metrics_str = ""
         for k in sorted(self.running_loss.keys()):
             metrics_str += ("  {:s}:{:.4f}, ").format(k, self.running_loss[k]/SUM_FREQ)
-        
+
         # print the training status
         print(training_str + metrics_str)
 
@@ -149,7 +149,7 @@ class Project3D(nn.Module):
 #     def __init__(self, model, decay, device='cpu'):
 #         def ema_avg(avg_model_param, model_param, num_averaged):
 #             return decay * avg_model_param + (1 - decay) * model_param
-        
+
 #         super().__init__(model, device, ema_avg, use_buffers=True)
 
 
@@ -159,12 +159,12 @@ class EMA():
         self.decay = decay
         self.shadow = {}
         self.backup = {}
-    
+
     def register(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone()
-    
+
 
     def update(self):
         for name, param in self.model.named_parameters():
@@ -180,7 +180,7 @@ class EMA():
                 self.backup[name] = param.data
                 param.data = self.shadow[name]
 
-    
+
     def restore(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
@@ -197,7 +197,7 @@ def gemerate_haze(rgb, depth, k, beta):
 
     tx = np.concatenate([transmitmap, transmitmap, transmitmap], axis=2)
     txcvt = (tx * 255).astype('uint8')
-    
+
     # guided filter smooth the transmit map
     tx_filtered = cv2.ximgproc.guidedFilter(guide=rgb, src=txcvt, radius=50, eps=1e-3, dDepth=-1)
 
@@ -207,3 +207,35 @@ def gemerate_haze(rgb, depth, k, beta):
     # print(fog_image*255)
     fog_image = (fog_image * 255).astype('uint8')
     return fog_image
+
+def disp_loss(disp_preds, disp_init_pred, disp_gt, valid, loss_gamma=0.9, max_disp=192):
+    """ Loss function defined over sequence of flow predictions """
+
+    n_predictions = len(disp_preds)
+    assert n_predictions >= 1
+    disp_loss = 0.0
+    mag = torch.sum(disp_gt**2, dim=1).sqrt()
+    valid = ((valid >= 0.5) & (mag < max_disp)).unsqueeze(1)
+    assert valid.shape == disp_gt.shape, [valid.shape, disp_gt.shape]
+    assert not torch.isinf(disp_gt[valid.bool()]).any()
+
+
+    disp_loss += 1.0 * F.smooth_l1_loss(disp_init_pred[valid.bool()], disp_gt[valid.bool()], size_average=True)
+    for i in range(n_predictions):
+        adjusted_loss_gamma = loss_gamma**(15/(n_predictions - 1))
+        i_weight = adjusted_loss_gamma**(n_predictions - i - 1)
+        i_loss = (disp_preds[i] - disp_gt).abs()
+        assert i_loss.shape == valid.shape, [i_loss.shape, valid.shape, disp_gt.shape, disp_preds[i].shape]
+        disp_loss += i_weight * i_loss[valid.bool()].mean()
+
+    epe = torch.sum((disp_preds[-1] - disp_gt)**2, dim=1).sqrt()
+    epe = epe.view(-1)[valid.view(-1)]
+
+    metrics = {
+        'epe': epe.mean().item(),
+        '1px': (epe < 1).float().mean().item(),
+        '3px': (epe < 3).float().mean().item(),
+        '5px': (epe < 5).float().mean().item(),
+    }
+
+    return disp_loss, metrics
