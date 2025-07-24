@@ -11,10 +11,10 @@ python -u main.py --data_dir /path \
     --gpus 0 1 --num_steps 100000 --batch_size 4 --lr 0.0001 --image_size 288 960 --wdecay 0.00001 --gamma=0.85 --mixed_precision
 
 # stage 2
-# python -u main.py --data_dir /home/sdb/zhouhanyu/data \
-#     --stage kitti --restore_flow_ckpt model/raft.pth --restore_disp_ckpt model/aanet.pth \
-#     --restore_pose_encoder_ckpt model/pose/pose_encoder.pth --restore_pose_decoder_ckpt model/pose/pose.pth \
-#     --gpus 0 --num_steps 100000 --batch_size 2 --lr 0.0001 --image_size 288 960 --wdecay 0.00001 --gamma=0.85 --mixed_precision
+python -u main.py --data_dir /home/ridoo14/Projects/OpticalFlowDA/datasets/KITTI \
+    --stage kitti  --restore_disp_ckpt checkpoints/mocha-stereo.pth \
+    --restore_pose_decoder_ckpt checkpoints/decoder-pth \
+    --gpus 0 --num_steps 100000 --batch_size 1 --lr 0.0001 --image_size 128 512 --wdecay 0.00001 --gamma=0.85 --mixed_precision
 
 
 # stage 3

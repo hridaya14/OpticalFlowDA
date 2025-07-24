@@ -58,6 +58,7 @@ if __name__ == '__main__':
 
     # AANet
     parser.add_argument('--resume', action='store_true', help='Resume training from latest checkpoint')
+    parser.add_argument('--max_disp', default=192, type=int, help='Max disparity')
 
     parser.add_argument('--feature_similarity', default='correlation', type=str,
                         help='Similarity measure for matching cost')
@@ -66,16 +67,12 @@ if __name__ == '__main__':
 
     parser.add_argument('--load_pseudo_gt', action='store_true', help='Load pseudo gt for supervision')
 
-    #Mocha
-    parser.add_argument('--corr_implementation', choices=["reg", "alt", "reg_cuda", "alt_cuda"], default="reg", help="correlation volume implementation")
-    parser.add_argument('--shared_backbone', action='store_true', help="use a single backbone for the context and feature encoders")
-    parser.add_argument('--corr_levels', type=int, default=2, help="number of levels in the correlation pyramid")
-    parser.add_argument('--corr_radius', type=int, default=4, help="width of the correlation pyramid")
-    parser.add_argument('--n_downsample', type=int, default=2, help="resolution of the disparity field (1/2^K)")
-    parser.add_argument('--slow_fast_gru', action='store_true', help="iterate the low-res GRUs more frequently")
-    parser.add_argument('--n_gru_layers', type=int, default=3, help="number of hidden GRU levels")
-    parser.add_argument('--hidden_dims', nargs='+', type=int, default=[128]*3, help="hidden state and context dimensions")
-    parser.add_argument('--max_disp', type=int, default=192, help="max disp of geometry encoding volume")
+    # BANet
+    parser.add_argument('--img_gamma', type=float, nargs='+', default=None, help="gamma range")
+    parser.add_argument('--saturation_range', type=float, nargs='+', default=[0, 1.4], help='color saturation')
+    parser.add_argument('--do_flip', default=False, choices=['h', 'v'], help='flip the images horizontally or vertically')
+    parser.add_argument('--spatial_scale', type=float, nargs='+', default=[-0.4, 0.8], help='re-scale the images randomly')
+    parser.add_argument('--noyjitter', action='store_true', help='don\'t simulate imperfect rectification')
 
     # PoseNet
     parser.add_argument('--num_layers', default=18, type=int, choices=[18, 34, 50, 101, 152], help='number of resnet layers')
@@ -100,6 +97,6 @@ if __name__ == '__main__':
     model = Model(args)
     print("=> Start training\n\n")
 
-    model.stage_1_train()
+    model.generate_depth_foggy_images()
 
     print("=> End training\n\n")

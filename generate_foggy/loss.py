@@ -6,7 +6,7 @@ MAX_FLOW = 400
 def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
     """ Loss function defined over sequence of flow predictions """
 
-    n_predictions = len(flow_preds)    
+    n_predictions = len(flow_preds)
     flow_loss = 0.0
     # exlude invalid pixels and extremely large diplacements
     mag = torch.sum(flow_gt**2, dim=1).sqrt()
@@ -28,6 +28,35 @@ def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
     }
 
     return flow_loss, metrics
+
+def disp_loss(disp_preds, disp_gt, valid, max_disp=192):
+    """ Loss function defined over sequence of disparity predictions """
+
+    # Ensure shapes are [B, H, W]
+    if disp_gt.dim() == 4:
+        disp_gt = disp_gt.squeeze(1)
+    if valid.dim() == 4:
+        valid = valid.squeeze(1)
+    if disp_preds[0].dim() == 4:
+        disp_preds = [p.squeeze(1) for p in disp_preds]
+
+    mask = (disp_gt < max_disp) & (disp_gt > 0)
+
+    loss = 0.0
+    loss += 0.3 * F.smooth_l1_loss(disp_preds[1][mask], disp_gt[mask], reduction='mean')
+    loss += 1.0 * F.smooth_l1_loss(disp_preds[0][mask], disp_gt[mask], reduction='mean')
+
+    epe = torch.abs(disp_preds[0] - disp_gt)[mask]
+    epe = epe.view(-1)
+
+    metrics = {
+        'disp_epe': epe.mean().item(),
+        '1px': (epe < 1).float().mean().item(),
+        '3px': (epe < 3).float().mean().item(),
+        '5px': (epe < 5).float().mean().item(),
+    }
+
+    return loss, metrics
 
 
 def disp_pyramid_loss(disp_preds, disp_gt, gt_mask, pseudo_gt_disp, pseudo_mask, load_pseudo_gt=False):
@@ -70,7 +99,7 @@ def disp_pyramid_loss(disp_preds, disp_gt, gt_mask, pseudo_gt_disp, pseudo_mask,
             pseudo_disp_loss += weight * pseudo_curr_loss
 
             pseudo_pyramid_loss.append(pseudo_curr_loss)
-            
+
     total_loss = disp_loss + pseudo_disp_loss
     metrics = {
         'disp_epe': pyramid_loss[-1],

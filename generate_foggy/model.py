@@ -1,9 +1,9 @@
 from __future__ import print_function, division
 import sys
+
+from core.raft import RAFT
+
 sys.path.append('core')
-
-from raft import RAFT
-
 
 import argparse
 import os
@@ -14,7 +14,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math
 import skimage.io
-from Mocha.core.mocha_stereo import Mocha
 
 import torch
 import torch.nn as nn
@@ -22,12 +21,13 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
-# from aanet import AANet
+from aanet import AANet
 from posenet import PoseNet
+import evaluate
 import datasets
 
 from glob import glob
-from tool import Logger, Project3D, BackprojectDepth, disp_loss, gemerate_haze, EMA
+from tool import Logger, Project3D, BackprojectDepth, gemerate_haze, EMA
 from loss import sequence_loss, disp_pyramid_loss, motion_consis_loss, cross_domain_consis_loss, self_supervised_loss, loss_KL_div
 
 from utils.utils import transformation_from_parameters, disp_to_depth, filter_base_params, filter_specific_params
@@ -108,7 +108,7 @@ class Model(object):
         model_flow.train()
 
         # aanet
-        model_depth = Mocha(self.args)
+        model_depth = AANet(self.args)
         print("Parameter Count: %d" % count_parameters(model_depth))
 
         if self.args.restore_disp_ckpt is not None:
@@ -118,7 +118,6 @@ class Model(object):
 
         model_depth.cuda()
         model_depth.train()
-        model_depth.module.freeze_bn()
 
         if self.args.stage != 'chairs':
             model_flow.module.freeze_bn()
@@ -129,10 +128,26 @@ class Model(object):
             pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
 
 
-        depth_optimizer = optim.AdamW(model_depth.parameters(), lr=self.args.lr, weight_decay=self.args.wdecay, eps=1e-6)
+        # disp optimizer
+        specific_params = list(filter(filter_specific_params,
+                                  model_depth.named_parameters()))
+        base_params = list(filter(filter_base_params,
+                                model_depth.named_parameters()))
+        specific_params = [kv[1] for kv in specific_params]  # kv is a tuple (key, value)
+        base_params = [kv[1] for kv in base_params]
 
-        depth_scheduler = optim.lr_scheduler.OneCycleLR(depth_optimizer, self.args.lr, self.args.num_steps+100,
-            pct_start=0.01, cycle_momentum=False, anneal_strategy='linear')
+        specific_lr = self.args.lr * 0.1
+        milestones = [400, 600, 800, 900]
+        params_group = [
+            {'params': base_params, 'lr': self.args.lr},
+            {'params': specific_params, 'lr': specific_lr},
+        ]
+        depth_optimizer = optim.Adam(params_group, weight_decay=self.args.wdecay*10)
+        depth_scheduler = optim.lr_scheduler.MultiStepLR(depth_optimizer, milestones=milestones, gamma=0.5, last_epoch=-1)
+
+        # depth_scheduler = optim.lr_scheduler.OneCycleLR(depth_optimizer, self.args.lr, self.args.num_steps+100,
+        #     pct_start=0.05, cycle_momentum=False, anneal_strategy='linear')
+        # optimizer, scheduler = fetch_optimizer(self.args, model_flow)
 
         total_steps = 0
         flow_scaler = GradScaler(enabled=self.args.mixed_precision)
@@ -176,11 +191,17 @@ class Model(object):
                     image1_right = (image1_right + stdv * torch.randn(*image1_right.shape).cuda()).clamp(0.0, 255.0)
                     image2_right = (image2_right + stdv * torch.randn(*image2_right.shape).cuda()).clamp(0.0, 255.0)
 
-                _,flow_predictions = model_flow(image1_left,image2_left, iters = self.args.iters)
-                disp_init_pred, disp_preds = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
+                images = torch.stack([image1_left, image2_left], dim=0)
+
+                output = model_flow(images)
+                flow_predictions = output["flow_preds"]
+                depth_predictions = model_depth(image1_left, image1_right)  # list of H/12, H/6, H/3, H/2, H
 
                 flow_loss, flow_metrics = sequence_loss(flow_predictions, flow, valid, self.args.gamma)
-                depth_loss, depth_metrics = disp_loss(disp_preds, disp_init_pred, disp, valid, max_disp=self.args.max_disp)
+                if self.args.load_pseudo_gt:
+                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, pseudo_gt_disp, pseudo_mask, self.args.load_pseudo_gt)
+                else:
+                    disp_loss, disp_metrics = disp_pyramid_loss(depth_predictions, disp, disp_mask, disp, disp_mask, self.args.load_pseudo_gt)
 
                 # flow network update
                 flow_scaler.scale(flow_loss).backward()
@@ -192,9 +213,9 @@ class Model(object):
                 flow_scaler.update()
 
                 # disp network update
-                depth_scaler.scale(depth_loss).backward()
+                depth_scaler.scale(adaptive_weight * disp_loss).backward()
                 depth_scaler.unscale_(depth_optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(model_flow.parameters(), self.args.clip)
 
                 depth_scaler.step(depth_optimizer)
                 depth_scheduler.step()
@@ -203,7 +224,7 @@ class Model(object):
                 total_steps += 1
 
                 # print info
-                dict_metric = dict(flow_metrics,**depth_metrics)
+                dict_metric = dict(flow_metrics)
                 logger.push(dict_metric)
                 # logger.push(disp_metrics)
 
@@ -523,7 +544,7 @@ class Model(object):
 
         # param setting
         # aanet
-        model_disp = Mocha(self.args)
+        model_disp = AANet(self.args)
         print("Parameter Count: %d" % count_parameters(model_disp))
 
         if self.args.restore_disp_ckpt is not None:
