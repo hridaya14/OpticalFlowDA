@@ -503,7 +503,7 @@ class KITTI(FlowDataset):
     def __init__(self, aug_params=None, input_frames=5, forward_warp=False):
         super(KITTI, self).__init__(aug_params=aug_params, input_frames=input_frames, sparse=True, forward_warp=forward_warp)
 
-        root = 'datasets/KITTI/'
+        root = '/home/ridoo14/Projects/OpticalFlowDA/datasets/'
 
         self.image_list = []
         self.flow_list = []
@@ -515,7 +515,7 @@ class KITTI(FlowDataset):
                     [(root + "KITTI-multiview/training/image_2/000{:03}_{:02}.png".format(idx_list, i - idx_image + 10)) for
                      i in range(input_frames)])
                 self.flow_list.append(
-                    [root + "training/flow_occ/000{:03}_10.png".format(idx_list)] * (input_frames - 1))
+                    [root + "KITTI/training/flow_occ/000{:03}_10.png".format(idx_list)] * (input_frames - 1))
                 self.has_gt_list.append(
                     [False] * idx_image + [True] + [False] * (input_frames - 2 - idx_image))
         print(self.image_list[0:3])

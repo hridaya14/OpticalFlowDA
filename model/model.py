@@ -3,16 +3,16 @@ import argparse
 import numpy as np
 from pathlib import Path
 
-from core.utils.logger import Logger
-from model.core.ur2p_inspired.model import FogFormerEnhancer
+from core.memflow.core.utils.logger import Logger
+# from model.core.ur2p_inspired.model import FogFormerEnhancer
 from core.memflow.core.Networks import build_network
 import torch
 import torch.nn as nn
-import core.datasets_video as datasets
-from .datasets import fetch_dataloader as loader
-from core.loss import sequence_loss
-from core.optimizer import fetch_optimizer
-from core.utils.misc import process_cfg
+import core.memflow.core.datasets_video as datasets
+from core.datasets import fetch_dataloader as loader
+from core.memflow.core.loss import sequence_loss
+from core.memflow.core.optimizer import fetch_optimizer
+# from core.utils.misc import process_cfg
 from loguru import logger as loguru_logger
 import random
 import os
@@ -264,9 +264,9 @@ class Model:
                                     group_name='mtorch')
             child_model = nn.SyncBatchNorm.convert_sync_batchnorm(build_network(cfg)).cuda()
             child_model = nn.parallel.DistributedDataParallel(child_model, device_ids=[rank])
-            enhancer_model = FogFormerEnhancer()
-            enhancer_model = nn.SyncBatchNorm.convert_sync_batchnorm(enhancer_model).cuda(rank)
-            enhancer_model = nn.parallel.DistributedDataParallel(enhancer_model, device_ids=[rank])
+            # enhancer_model = FogFormerEnhancer()
+            # enhancer_model = nn.SyncBatchNorm.convert_sync_batchnorm(enhancer_model).cuda(rank)
+            # enhancer_model = nn.parallel.DistributedDataParallel(enhancer_model, device_ids=[rank])
 
         loss_func = sequence_loss
 
@@ -322,7 +322,7 @@ class Model:
                 optimizer.zero_grad()
                 clean_imgs, foggy_images, flows, valids = [x.cuda() for x in data_blob]
 
-                enhanced_imgs = enhancer_model(foggy_images)
+                enhanced_imgs = foggy_images
 
                 with torch.cuda.amp.autocast(enabled=cfg.mixed_precision, dtype=torch.bfloat16):
 
@@ -347,6 +347,24 @@ class Model:
                         self.lambda_net * net_loss
                     )
 
+                    metrics = {
+                        "prior_loss": prior_loss.item(),
+                    }
+
+                scaler.scale(prior_loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(child_model.parameters(), cfg.trainer.clip)
+
+                scaler.step(optimizer)
+                scheduler.step()
+                scaler.update()
+
+                logger.push(metrics)
+
+                total_steps += 1
+                if total_steps > cfg.trainer.num_steps:
+                    should_keep_training = False
+                    break
 
 
 

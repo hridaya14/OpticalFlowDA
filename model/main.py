@@ -2,8 +2,16 @@ import argparse
 import os
 
 from core.memflow.core.utils.misc import process_cfg
+from loguru import logger as loguru_logger
+from pathlib import Path
 
-from .model import Model
+
+from model import Model
+import torch
+import numpy as np
+import random
+import torch.multiprocessing as mp
+
 def main_worker(rank, cfg):
     trainer = Model(cfg)
     trainer.train_memflow(rank, cfg)
@@ -13,7 +21,8 @@ if __name__ == '__main__':
     parser.add_argument('--name', default='MemFlowNet', help="name your experiment")
     parser.add_argument('--stage', help="determines which dataset to use for training")
     parser.add_argument('--validation', type=str, nargs='+')
-    parser.add_argument('--restore_ckpt', help="restore checkpoint")
+    parser.add_argument('--restore_ckpt', help="restore guide model checkpoint")
+    parser.add_argument('--restore_child_ckpt', help="restore child model checkpoint")
     # DDP
     parser.add_argument('--nodes', type=int, default=1, help='how many machines')
     parser.add_argument('--gpus', type=int, default=1, help='how many GPUs in one node')
@@ -25,13 +34,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.stage == 'things':
-        from configs.things_memflownet import get_cfg
+        from core.memflow.configs.things_memflownet_t import get_cfg
     elif args.stage == 'sintel':
         from configs.sintel_memflownet import get_cfg
     elif args.stage == 'spring_only':
         from configs.spring_memflownet import get_cfg
     elif args.stage == 'kitti':
-        from configs.kitti_memflownet import get_cfg
+        from core.memflow.configs.kitti_memflownet import get_cfg
 
     os.environ['CUDA_VISIBLE_DEVICES'] = args.GPU_ids
     if args.DDP:
