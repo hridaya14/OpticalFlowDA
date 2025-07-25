@@ -14,14 +14,14 @@ import torch.multiprocessing as mp
 
 def main_worker(rank, cfg):
     trainer = Model(cfg)
-    trainer.train_memflow(rank, cfg)
+    trainer.guided_learning(rank, cfg)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', default='MemFlowNet', help="name your experiment")
     parser.add_argument('--stage', help="determines which dataset to use for training")
     parser.add_argument('--validation', type=str, nargs='+')
-    parser.add_argument('--restore_ckpt', help="restore guide model checkpoint")
+    parser.add_argument('--restore_guide_ckpt', help="restore guide model checkpoint")
     parser.add_argument('--restore_child_ckpt', help="restore child model checkpoint")
     # DDP
     parser.add_argument('--nodes', type=int, default=1, help='how many machines')

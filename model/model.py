@@ -14,6 +14,7 @@ from core.memflow.core.loss import sequence_loss
 from core.memflow.core.optimizer import fetch_optimizer
 # from core.utils.misc import process_cfg
 from loguru import logger as loguru_logger
+from tqdm import tqdm
 import random
 import os
 import torch.distributed as dist
@@ -245,7 +246,6 @@ class Model:
 
 
     def guided_learning(self, gpu, cfg):
-
         rank = cfg.node_rank * cfg.gpus + gpu
         torch.cuda.set_device(rank)
 
@@ -264,36 +264,31 @@ class Model:
                                     group_name='mtorch')
             child_model = nn.SyncBatchNorm.convert_sync_batchnorm(build_network(cfg)).cuda()
             child_model = nn.parallel.DistributedDataParallel(child_model, device_ids=[rank])
-            # enhancer_model = FogFormerEnhancer()
-            # enhancer_model = nn.SyncBatchNorm.convert_sync_batchnorm(enhancer_model).cuda(rank)
-            # enhancer_model = nn.parallel.DistributedDataParallel(enhancer_model, device_ids=[rank])
 
         loss_func = sequence_loss
 
         if rank == 0:
-            loguru_logger.info("Parameter Count: %d" % count_parameters(child_model))
+            loguru_logger.info(f"[RANK {rank}] Parameter Count: {count_parameters(child_model)}")
 
         # Load Pretrained Guided Model
         if cfg.restore_guide_ckpt is not None:
-            print("[Loading ckpt from {}]".format(cfg.restore_ckpt))
+            loguru_logger.info(f"[RANK {rank}] Loading guided model checkpoint from {cfg.restore_guide_ckpt}")
             ckpt = torch.load(cfg.restore_guide_ckpt, map_location='cpu')
             ckpt_model = ckpt['model'] if 'model' in ckpt else ckpt
-            if 'module' in list(ckpt_model.keys())[0]:
+            try:
                 guide_model.load_state_dict(ckpt_model, strict=True)
-            else:
+            except:
                 guide_model.module.load_state_dict(ckpt_model, strict=True)
-
 
         # Load Child model
         if cfg.restore_child_ckpt is not None:
-            print("[Loading ckpt from {}]".format(cfg.restore_ckpt))
+            loguru_logger.info(f"[RANK {rank}] Loading child model checkpoint from {cfg.restore_child_ckpt}")
             ckpt = torch.load(cfg.restore_child_ckpt, map_location='cpu')
             ckpt_model = ckpt['model'] if 'model' in ckpt else ckpt
-            if 'module' in list(ckpt_model.keys())[0]:
+            try:
                 child_model.load_state_dict(ckpt_model, strict=True)
-            else:
+            except:
                 child_model.module.load_state_dict(ckpt_model, strict=True)
-
 
         child_model.train()
 
@@ -302,42 +297,39 @@ class Model:
         else:
             train_loader = loader(cfg, DDP=cfg.DDP, rank=rank)
 
-
         optimizer, scheduler = fetch_optimizer(child_model, cfg.trainer)
-
-        total_steps = 0
         scaler = GradScaler(enabled=cfg.mixed_precision)
         logger = Logger(child_model, scheduler, cfg)
 
+        total_steps = 0
         epoch = 0
-
         should_keep_training = True
+
+        loguru_logger.info(f"[RANK {rank}] Starting Guided Learning Training Loop...")
+
         while should_keep_training:
             epoch += 1
-
             if cfg.DDP:
                 train_sampler.set_epoch(epoch)
 
-            for i_batch, data_blob in enumerate(train_loader):
+            pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch} [RANK {rank}]", disable=(rank != 0))
+
+            for i_batch, data_blob in pbar:
                 optimizer.zero_grad()
                 clean_imgs, foggy_images, flows, valids = [x.cuda() for x in data_blob]
 
                 enhanced_imgs = foggy_images
 
                 with torch.cuda.amp.autocast(enabled=cfg.mixed_precision, dtype=torch.bfloat16):
-
                     with torch.no_grad():
-                        guide_preds, guide_net, guide_inp, guide_fmaps = guide_model(clean_imgs)
+                        guide_preds, guide_net, guide_inp, guide_fmaps = guide_model(clean_imgs, cfg)
 
                     enhanced_imgs = 2 * (enhanced_imgs / 255.0) - 1.0
-                    b = enhanced_imgs.shape[0]
 
                     query, key, net, inp = child_model.module.encode_context(enhanced_imgs[:, :-1, ...])
-
                     coords0, coords1, fmaps = child_model.module.encode_features(enhanced_imgs)
 
                     fmaps_loss = self.feature_criterion(fmaps, guide_fmaps)
-
                     inp_loss = self.feature_criterion(inp, guide_inp)
                     net_loss = self.feature_criterion(net, guide_net)
 
@@ -349,22 +341,32 @@ class Model:
 
                     metrics = {
                         "prior_loss": prior_loss.item(),
+                        "fmaps_loss": fmaps_loss.item(),
+                        "inp_loss": inp_loss.item(),
+                        "net_loss": net_loss.item(),
                     }
+
+                    pbar.set_postfix({k: f"{v:.4f}" for k, v in metrics.items()})
 
                 scaler.scale(prior_loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(child_model.parameters(), cfg.trainer.clip)
-
                 scaler.step(optimizer)
                 scheduler.step()
                 scaler.update()
 
                 logger.push(metrics)
-
                 total_steps += 1
-                if total_steps > cfg.trainer.num_steps:
+
+                if total_steps >= cfg.trainer.num_steps:
                     should_keep_training = False
                     break
+
+            if rank == 0:
+                loguru_logger.info(f"[RANK {rank}] Finished Epoch {epoch} | Total Steps: {total_steps}")
+
+        if rank == 0:
+            loguru_logger.info(f"[RANK {rank}] Guided learning training complete.")
 
 
 

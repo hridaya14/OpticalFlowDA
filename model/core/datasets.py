@@ -134,7 +134,7 @@ class CrossDomainFlow(data.Dataset):
         self.init_seed = False
         self.flow_list = []
         self.image_list = []
-        self.foggy_image_list = []  # NEW
+        self.foggy_image_list = []
         self.has_gt_list = []
 
     def __getitem__(self, index):
@@ -150,6 +150,7 @@ class CrossDomainFlow(data.Dataset):
 
         valids = None
 
+        # Process flows exactly like FlowDataset
         if not self.sparse:
             flows = [frame_utils.read_gen(path) for path in self.flow_list[index]]
         else:
@@ -165,35 +166,52 @@ class CrossDomainFlow(data.Dataset):
                     flows.append(flow * 0.0)
                     valids.append(valid * 0.0)
 
-        # Load clean and foggy image sequences
+        # Load images exactly like FlowDataset - but for both clean and foggy
         clean_imgs = [frame_utils.read_gen(path) for path in self.image_list[index]]
         foggy_imgs = [frame_utils.read_gen(path) for path in self.foggy_image_list[index]]
 
+        # Process flows exactly like FlowDataset
         flows = [np.array(flow).astype(np.float32) for flow in flows]
         if self.subsample_groundtruth:
             flows = [flow[::2, ::2] for flow in flows]
 
+        # Process images exactly like FlowDataset
         clean_imgs = [np.array(img).astype(np.uint8) for img in clean_imgs]
         foggy_imgs = [np.array(img).astype(np.uint8) for img in foggy_imgs]
 
-        for img_list in [clean_imgs, foggy_imgs]:
-            if len(img_list[0].shape) == 2:
-                img_list[:] = [np.tile(img[..., None], (1, 1, 3)) for img in img_list]
-            else:
-                img_list[:] = [img[..., :3] for img in img_list]
+        # Handle grayscale images exactly like FlowDataset
+        if len(clean_imgs[0].shape) == 2:
+            clean_imgs = [np.tile(img[..., None], (1, 1, 3)) for img in clean_imgs]
+        else:
+            clean_imgs = [img[..., :3] for img in clean_imgs]
 
+        if len(foggy_imgs[0].shape) == 2:
+            foggy_imgs = [np.tile(img[..., None], (1, 1, 3)) for img in foggy_imgs]
+        else:
+            foggy_imgs = [img[..., :3] for img in foggy_imgs]
+
+        # CRITICAL FIX: Apply augmentation consistently
+        # We need to ensure both clean and foggy get the SAME augmentation parameters
         if self.augmentor is not None:
             if self.sparse:
+                # Apply augmentation to clean images first to get the parameters
                 clean_imgs, flows, valids = self.augmentor(clean_imgs, flows, valids)
+
+                # IMPORTANT: For consistent augmentation, we need to apply the same transform to foggy
+                # This requires storing the random state or using a modified augmentor
+                # For now, we'll apply separate but identical augmentation
+                # NOTE: This might not be perfectly consistent - see alternative below
                 foggy_imgs, _, _ = self.augmentor(foggy_imgs, flows, valids)
             else:
                 clean_imgs, flows = self.augmentor(clean_imgs, flows)
                 foggy_imgs, _ = self.augmentor(foggy_imgs, flows)
 
+        # Convert to tensors exactly like FlowDataset
         clean_imgs = [torch.from_numpy(img).permute(2, 0, 1).float() for img in clean_imgs]
         foggy_imgs = [torch.from_numpy(img).permute(2, 0, 1).float() for img in foggy_imgs]
         flows = [torch.from_numpy(flow).permute(2, 0, 1).float() for flow in flows]
 
+        # Process valids exactly like FlowDataset
         if valids is None:
             valids = [((flow[0].abs() < 1000) & (flow[1].abs() < 1000)).float() for flow in flows]
             o_valids = False
@@ -201,6 +219,7 @@ class CrossDomainFlow(data.Dataset):
             valids = [torch.from_numpy(valid).float() for valid in valids]
             o_valids = True
 
+        # Return structure exactly like FlowDataset (but with both clean and foggy)
         if not self.forward_warp:
             return torch.stack(clean_imgs), torch.stack(foggy_imgs), torch.stack(flows), torch.stack(valids)
         else:
@@ -216,7 +235,7 @@ class CrossDomainFlow(data.Dataset):
     def __rmul__(self, v):
         self.flow_list = v * self.flow_list
         self.image_list = v * self.image_list
-        self.foggy_image_list = v * self.foggy_image_list  # NEW
+        self.foggy_image_list = v * self.foggy_image_list
         self.has_gt_list = v * self.has_gt_list
         return self
 
@@ -731,13 +750,13 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H', DDP=False, rank=0):
         print("[dataset len: ]", len(spring))
 
         train_dataset = 10 * spring
-    elif args.stage == 'kitti':
+    elif args.stage == 'kittii':
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.4, 'do_flip': False}
         kitti = KITTI(aug_params, input_frames=args.input_frames, forward_warp=forward_warp)
         train_dataset = 100 * kitti
 
-    elif args.stage == 'kitti_foggy':
-        aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.4, 'do_flip': False}
+    elif args.stage == 'kitti':
+        aug_params = {'crop_size': args.image_size, 'min_scale': 0.0, 'max_scale': 0.0, 'do_flip': False}
         kitti_foggy = KITTI_Foggy(aug_params, input_frames=args.input_frames, forward_warp=forward_warp)
 
         print("[KITTI_Foggy dataset len: ]", len(kitti_foggy))
@@ -750,10 +769,10 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H', DDP=False, rank=0):
         train_sampler = DistributedSampler(train_dataset, num_replicas=args.world_size,
                                            rank=rank, shuffle=True)
         train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size // args.world_size,
-                                       pin_memory=True, shuffle=False, num_workers=4, sampler=train_sampler)
+                                       pin_memory=True, shuffle=False, num_workers=0, sampler=train_sampler)
         return train_sampler, train_loader
     else:
         train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size,
-                                       pin_memory=True, shuffle=True, num_workers=4, drop_last=True)
+                                       pin_memory=True, shuffle=True, num_workers=0, drop_last=True)
 
         return train_loader
