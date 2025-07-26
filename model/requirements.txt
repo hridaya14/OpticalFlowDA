@@ -1,0 +1,56 @@
+absl-py==2.3.1
+Brotli @ file:///croot/brotli-split_1714483155106/work
+cachetools==5.5.2
+certifi @ file:///croot/certifi_1725551672989/work/certifi
+charset-normalizer @ file:///croot/charset-normalizer_1721748349566/work
+contourpy==1.1.1
+cycler==0.12.1
+einops==0.8.1
+flash-attn @ file:///home/ridoo14/Projects/OpticalFlowDA/checkpoints/wheels/flash_attn-2.3.2%2Bcu116torch1.13cxx11abiFALSE-cp38-cp38-linux_x86_64.whl#sha256=60b39ed4892ba907a96b92a80b3b8bf6a5dbf74cb0ade5236ee28f684cb151a8
+fonttools==4.57.0
+google-auth==2.40.3
+google-auth-oauthlib==1.0.0
+grpcio==1.70.0
+h5py==3.11.0
+idna @ file:///croot/idna_1714398848350/work
+imageio==2.35.1
+importlib_metadata==8.5.0
+importlib_resources==6.4.5
+kiwisolver==1.4.7
+loguru==0.7.3
+Markdown==3.7
+MarkupSafe==2.1.5
+matplotlib==3.7.5
+mkl-fft @ file:///croot/mkl_fft_1695058164594/work
+mkl-random @ file:///croot/mkl_random_1695059800811/work
+mkl-service==2.4.0
+ninja==1.11.1.4
+numpy @ file:///work/mkl/numpy_and_numpy_base_1682953417311/work
+oauthlib==3.3.1
+opencv-python==4.12.0.88
+packaging==25.0
+pillow @ file:///croot/pillow_1721059439630/work
+protobuf==5.29.5
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+pyparsing==3.1.4
+PySocks @ file:///tmp/build/80754af9/pysocks_1605305779399/work
+python-dateutil==2.9.0.post0
+PyYAML==6.0.2
+requests @ file:///croot/requests_1721410876868/work
+requests-oauthlib==2.0.0
+rsa==4.9.1
+scipy==1.10.1
+six==1.17.0
+tensorboard==2.14.0
+tensorboard-data-server==0.7.2
+timm==0.4.12
+torch==1.13.1
+torchaudio==0.13.1
+torchvision==0.14.1
+tqdm==4.67.1
+typing_extensions @ file:///croot/typing_extensions_1715268824938/work
+urllib3 @ file:///croot/urllib3_1727769808118/work
+Werkzeug==3.0.6
+yacs==0.1.8
+zipp==3.20.2

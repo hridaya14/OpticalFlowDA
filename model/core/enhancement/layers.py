@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flash_attn.modules.mha import MHA
 
 class CNNStem(nn.Module):
     '''
@@ -11,7 +12,7 @@ class CNNStem(nn.Module):
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU()
@@ -23,70 +24,64 @@ class CNNStem(nn.Module):
 
 class FogAttentionBlock(nn.Module):
     '''
-    Enhanced FogAttentionBlock:
-    - Captures both local (via DW conv) and global (via MHSA) fog structure.
-    - Applies SE-style channel reweighting.
-    - Uses LayerNorm + optional relative position bias for stability.
-    - Includes gated fusion instead of plain 1×1 projection.
+    FlashAttention-enhanced fog attention block.
+    - Uses FlashAttention for better performance and memory usage.
+    - Keeps same API and structure as FogAttentionBlock to be drop-in replaceable.
     '''
     def __init__(self, dim, heads=4, with_positional_bias=True):
         super().__init__()
 
-        # Local spatial structure via depthwise convolution
         self.conv_local = nn.Sequential(
-            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim),  # depthwise
+            nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim),
             nn.BatchNorm2d(dim),
-            nn.ReLU()
+            nn.ReLU(inplace=True)
         )
 
-        # Multi-head spatial attention
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
-        self.norm = nn.LayerNorm(dim)
+        # FlashAttention v2 module from MemFlow paper
+        self.attn = MHA(
+            embed_dim=dim,
+            num_heads=heads,
+            dropout=0.0,
+            causal=False  # No temporal causality needed
+        )
 
-        # Optional learnable position bias (adds spatial info)
+        self.norm = nn.LayerNorm(dim)
         self.with_positional_bias = with_positional_bias
         if with_positional_bias:
-            self.rel_bias = nn.Parameter(torch.zeros(1, dim))  # simplified bias (can extend to 2D)
+            self.rel_bias = nn.Parameter(torch.zeros(1, dim))  # Simple scalar bias per channel
 
-        # Channel Attention (SE block)
         self.channel_attn = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(dim, dim // 4, kernel_size=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(dim // 4, dim, kernel_size=1),
             nn.Sigmoid()
         )
 
-        # Gated fusion instead of linear 1×1 projection
         self.gate_conv = nn.Conv2d(dim, dim, kernel_size=1)
 
     def forward(self, x):
-        res = x                                # Save input for residual
-        x = self.conv_local(x)                 # Local spatial info: [B, C, H, W]
+        res = x
+        x = self.conv_local(x)
         B, C, H, W = x.shape
 
-        # Flatten for attention: [B, C, H, W] -> [B, H*W, C]
-        x_flat = x.flatten(2).transpose(1, 2)  # [B, HW, C]
+        x_flat = x.flatten(2).transpose(1, 2).contiguous()  # [B, HW, C]
+        x_norm = self.norm(x_flat)
 
-        # LayerNorm before attention
-        x_flat = self.norm(x_flat)
-
-        # Positional Bias (optional)
         if self.with_positional_bias:
-            x_flat = x_flat + self.rel_bias
+            x_norm = x_norm + self.rel_bias
 
-        # MHSA
-        x_attn, _ = self.attn(x_flat, x_flat, x_flat)  # [B, HW, C]
-        x_attn = x_attn.transpose(1, 2).view(B, C, H, W)  # Reshape back
+        # FlashAttention expects (B, T, C) input
+        x_attn = self.attn(x_norm)  # [B, HW, C]
+        x_attn = x_attn.transpose(1, 2).view(B, C, H, W)
 
-        # Channel Attention (SE)
         weights = self.channel_attn(x_attn)
-        x_attn = x_attn * weights                      # Reweighted features
+        x_attn = x_attn * weights
 
-        # Gated Fusion
         fused = res + x_attn
         gate = torch.sigmoid(self.gate_conv(fused))
         return fused * gate
+
 
 class IlluminationEstimator(nn.Module):
     '''
@@ -96,7 +91,7 @@ class IlluminationEstimator(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, in_channels // 2, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels // 2, 1, 1),  # Output 1-channel light map
             nn.Sigmoid()
         )
@@ -113,7 +108,7 @@ class ReflectanceEstimator(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, in_channels, 1),
             nn.Sigmoid()
         )
@@ -131,7 +126,7 @@ class AdaptiveColorCorrector(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, 3, 1)  # RGB residual
         )
 
@@ -172,7 +167,7 @@ class Reconstruction(nn.Module):
         self.final = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(in_channels),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(in_channels, out_channels, kernel_size=1)
         )
 

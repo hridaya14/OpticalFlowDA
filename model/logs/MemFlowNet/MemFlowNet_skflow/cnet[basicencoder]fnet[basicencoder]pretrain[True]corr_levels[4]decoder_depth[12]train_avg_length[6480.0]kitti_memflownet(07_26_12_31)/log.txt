@@ -1,0 +1,60 @@
+2025-07-26 12:31:31.644 | INFO     | __main__:<module>:58 - DDP: True
+GPU_ids: 0
+MemFlowNet_skflow:
+  cnet: basicencoder
+  corr_fn: default
+  corr_levels: 4
+  critical_params: ['cnet', 'fnet', 'pretrain', 'corr_levels', 'decoder_depth', 'train_avg_length']
+  decoder_depth: 12
+  down_ratio: 8
+  feat_dim: 256
+  fnet: basicencoder
+  gma: GMA-SK2
+  pretrain: True
+  train_avg_length: 6480.0
+add_noise: False
+batch_size: 1
+critical_params: []
+enable_long_term: False
+enable_long_term_count_usage: True
+eval_only: False
+filter_epe: False
+gamma: 0.85
+gpus: 1
+image_size: [288, 960]
+input_frames: 3
+log_dir: logs/MemFlowNet/MemFlowNet_skflow/cnet[basicencoder]fnet[basicencoder]pretrain[True]corr_levels[4]decoder_depth[12]train_avg_length[6480.0]kitti_memflownet(07_26_12_31)
+max_flow: 400
+max_long_term_elements: 10000
+max_mid_term_frames: 2
+mem_every: 1
+min_mid_term_frames: 1
+mixed_precision: True
+name: MemFlowNet
+network: MemFlowNet_skflow
+node_rank: 0
+nodes: 1
+num_prototypes: 128
+num_ref_frames: 2
+restore_child_ckpt: /home/ridoo14/Projects/OpticalFlowDA/checkpoints/MemFlowNet_kitti.pth
+restore_guide_ckpt: /home/ridoo14/Projects/OpticalFlowDA/checkpoints/MemFlowNet_kitti.pth
+restore_steps: 0
+stage: kitti
+suffix: kitti_memflownet
+sum_freq: 100
+top_k: None
+train_avg_length: 6480.0
+trainer:
+  adamw_decay: 0.0001
+  anneal_strategy: linear
+  canonical_lr: 0.000175
+  clip: 1.0
+  epsilon: 1e-08
+  num_steps: 40000
+  optimizer: adamw
+  scheduler: OneCycleLR
+use_smoothl1: False
+val_decoder_depth: 15
+val_freq: 10000
+validation: None
+world_size: 1

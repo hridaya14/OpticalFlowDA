@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 
 from core.memflow.core.utils.logger import Logger
-# from model.core.ur2p_inspired.model import FogFormerEnhancer
+from core.enhancement.model import FogEnhancer
 from core.memflow.core.Networks import build_network
 import torch
 import torch.nn as nn
@@ -264,7 +264,8 @@ class Model:
                                     group_name='mtorch')
             child_model = nn.SyncBatchNorm.convert_sync_batchnorm(build_network(cfg)).cuda()
             child_model = nn.parallel.DistributedDataParallel(child_model, device_ids=[rank])
-
+            enhancement_model = nn.SyncBatchNorm.convert_sync_batchnorm(FogEnhancer()).cuda()
+            enhancement_model = nn.parallel.DistributedDataParallel(enhancement_model,device_ids=[rank])
         loss_func = sequence_loss
 
         if rank == 0:
@@ -317,8 +318,10 @@ class Model:
             for i_batch, data_blob in pbar:
                 optimizer.zero_grad()
                 clean_imgs, foggy_images, flows, valids = [x.cuda() for x in data_blob]
+                clean_imgs = 2 * (clean_imgs / 255.0) - 1.0
+                b = clean_imgs.shape[0]
 
-                enhanced_imgs = foggy_images
+                enhanced_imgs = enhancement_model(foggy_images)
 
                 with torch.cuda.amp.autocast(enabled=cfg.mixed_precision, dtype=torch.bfloat16):
                     with torch.no_grad():
@@ -329,6 +332,7 @@ class Model:
                     query, key, net, inp = child_model.module.encode_context(enhanced_imgs[:, :-1, ...])
                     coords0, coords1, fmaps = child_model.module.encode_features(enhanced_imgs)
 
+                    # Feature prior loss
                     fmaps_loss = self.feature_criterion(fmaps, guide_fmaps)
                     inp_loss = self.feature_criterion(inp, guide_inp)
                     net_loss = self.feature_criterion(net, guide_net)
@@ -339,14 +343,45 @@ class Model:
                         self.lambda_net * net_loss
                     )
 
+                    # Computing optical flow
+                    values = None
+                    video_flow_predictions = []  # frame by frame
+                    for ti in range(0, cfg.input_frames - 1):
+                        if ti < cfg.num_ref_frames:
+                            ref_values = values
+                            ref_keys = key[:, :, :ti + 1]
+                        else:
+                            indices = [torch.randperm(ti)[:cfg.num_ref_frames - 1] for _ in range(b)]
+                            ref_values = torch.stack([
+                                values[bi, :, indices[bi]] for bi in range(b) # type: ignore
+                            ], 0)
+                            ref_keys = torch.stack([
+                                key[bi, :, indices[bi]] for bi in range(b)
+                            ], 0)
+                            ref_keys = torch.cat([ref_keys, key[:, :, ti].unsqueeze(2)], dim=2)
+
+                        # predict flow from frame ti to frame ti+1
+                        flow_pr, current_value = child_model.module.predict_flow(net[:, ti], inp[:, ti], coords0, coords1, # type: ignore
+                                                                    fmaps[:, ti:ti + 2], query[:, :, ti], ref_keys,
+                                                                        ref_values) # type: ignore
+                        values = current_value if values is None else torch.cat([values, current_value], dim=2)
+                        video_flow_predictions.append(torch.stack(flow_pr, dim=0))
+                    # loss function
+                    video_flow_predictions = torch.stack(video_flow_predictions, dim=2)  # Iter, B, N-1, 2, H, W
+
+                    loss, flow_metrics, _ = loss_func(video_flow_predictions, flows, valids, cfg)
+
+
+
                     metrics = {
                         "prior_loss": prior_loss.item(),
                         "fmaps_loss": fmaps_loss.item(),
                         "inp_loss": inp_loss.item(),
                         "net_loss": net_loss.item(),
                     }
+                    dict_metrics = dict(flow_metrics,**metrics)
 
-                    pbar.set_postfix({k: f"{v:.4f}" for k, v in metrics.items()})
+                    pbar.set_postfix({k: f"{v:.4f}" for k, v in dict_metrics.items()})
 
                 scaler.scale(prior_loss).backward()
                 scaler.unscale_(optimizer)
@@ -355,7 +390,7 @@ class Model:
                 scheduler.step()
                 scaler.update()
 
-                logger.push(metrics)
+                logger.push(dict_metrics)
                 total_steps += 1
 
                 if total_steps >= cfg.trainer.num_steps:
